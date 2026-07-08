@@ -1,7 +1,7 @@
 {
   "name": "กาญนะจ๊ะบุรีทริป",
   "short_name": "กาญทริป",
-  "description": "PWA เกมทริป สมุดความทรงจำ Album Feed และ Google Drive Hub สำหรับแชร์รูปเต็มความละเอียดในทริปกาญจนบุรี",
+  "description": "PWA เกมทริป สมุดความทรงจำ Album Feed และ Firebase Live Feed + Accounts + Admin Drive Hub + Google Drive Media Hub สำหรับแชร์โมเมนต์ คอมเมนต์ และรูปเต็มความละเอียดในทริปกาญจนบุรี",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

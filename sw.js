@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kannajaburi-trip-v1.3.0';
+const CACHE_NAME = 'kannajaburi-trip-v1.7.0';
 const APP_SHELL = [
   './',
   './index.html',
@@ -6,6 +6,7 @@ const APP_SHELL = [
   './src/app.js',
   './src/state.js',
   './src/drive.js',
+  './src/firebaseHub.js',
   './src/mediaStore.js',
   './src/styles.css',
   './assets/icons/icon-192.png',
