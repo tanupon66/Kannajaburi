@@ -1,0 +1,25 @@
+{
+  "name": "กาญนะจ๊ะบุรีทริป",
+  "short_name": "กาญทริป",
+  "description": "PWA เกมทริป สมุดความทรงจำ Album Feed และ Google Drive Hub สำหรับแชร์รูปเต็มความละเอียดในทริปกาญจนบุรี",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d2c28",
+  "theme_color": "#123d37",
+  "icons": [
+    {
+      "src": "./assets/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./assets/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
