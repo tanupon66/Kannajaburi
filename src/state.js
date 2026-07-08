@@ -1,8 +1,8 @@
-export const STORAGE_KEY = 'kannajaburi-trip-state-v2';
-export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v1';
+export const STORAGE_KEY = 'kannajaburi-trip-state-v7';
+export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v6';
 
 export const DEFAULT_STATE = {
-  schema: 2,
+  schema: 7,
   appName: 'กาญนะจ๊ะบุรีทริป',
   trip: {
     title: 'กาญนะจ๊ะบุรีทริป',
@@ -11,17 +11,25 @@ export const DEFAULT_STATE = {
     mood: 'คืนนี้ต้องมีตำนาน'
   },
   profile: {
+    accountId: '',
     name: '',
     role: 'สายคอนเทนต์',
-    color: '#0f6b5e'
+    color: '#0f6b5e',
+    isAdmin: false,
+    pinHint: '',
+    createdAt: ''
   },
   members: [],
+  accounts: [],
+  tripSettings: [],
   moments: [],
   reactions: [],
+  comments: [],
   questsDone: {},
   questEvents: [],
   bingo: null,
   secretBuddy: null,
+  checklist: { id: 'shared-checklist', type: 'checklist', items: {}, createdAt: '', updatedAt: '', storage: 'local' },
   votes: [],
   quotes: [],
   expenses: [],
@@ -31,12 +39,27 @@ export const DEFAULT_STATE = {
     driveRootFolderName: 'กาญนะจ๊ะบุรีทริป - Shared Memories',
     driveChildren: {},
     lastSyncAt: '',
-    syncMode: 'drive-first',
+    syncMode: 'firebase-first',
     autoSyncOnStart: true,
     liveSyncEnabled: true,
-    syncIntervalSec: 45,
+    syncIntervalSec: 20,
+    useIncrementalSync: true,
+    collectionSyncAt: {},
+    socialLiveMode: true,
     lastDriveError: '',
-    installPromptDismissed: false
+    firebaseEnabled: false,
+    firebaseTripId: 'kannajaburi-trip',
+    firebaseApiKey: '',
+    firebaseAuthDomain: '',
+    firebaseProjectId: '',
+    firebaseStorageBucket: '',
+    firebaseMessagingSenderId: '',
+    firebaseAppId: '',
+    lastFirebaseError: '',
+    installPromptDismissed: false,
+    adminDriveOwner: '',
+    adminDriveSharedAt: '',
+    driveManagedByAdmin: true
   }
 };
 
@@ -148,9 +171,9 @@ export function formatThaiDate(value) {
 
 export function scoreFromState(state) {
   const questScore = Object.keys(state.questsDone || {}).length * 15;
-  const momentScore = (state.moments || []).length * 10;
-  const quoteScore = (state.quotes || []).length * 5;
-  const voteScore = (state.votes || []).length * 8;
+  const momentScore = (state.moments || []).filter(item => !item.deleted).length * 10;
+  const quoteScore = (state.quotes || []).filter(item => !item.deleted).length * 5;
+  const voteScore = (state.votes || []).filter(item => !item.deleted).length * 8;
   return questScore + momentScore + quoteScore + voteScore;
 }
 

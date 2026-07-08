@@ -10,6 +10,7 @@ import {
   uid
 } from './state.js';
 import { DriveSync } from './drive.js';
+import { FirebaseHub } from './firebaseHub.js';
 import { mediaId, saveMediaBlob, getMediaBlob, mediaBlobUrl } from './mediaStore.js';
 
 let state = loadState();
@@ -17,9 +18,11 @@ let currentPage = 'home';
 let deferredInstallPrompt = null;
 let currentGameDeck = 'most';
 let reel = { open: false, index: 0, timer: null };
+let composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '' };
 let syncTimer = null;
 let isSyncing = false;
 let syncStatus = { text: 'Local cache ready', tone: 'idle' };
+let nextSyncAt = 0;
 
 const app = document.querySelector('#app');
 const toastEl = document.querySelector('#toast');
@@ -32,6 +35,149 @@ const drive = new DriveSync({
     renderSyncStatusOnly();
   }
 });
+
+const firebase = new FirebaseHub({
+  getState: () => state,
+  saveState: persist,
+  toast,
+  onStatus: (text, tone = 'info') => {
+    syncStatus = { text, tone };
+    renderSyncStatusOnly();
+  },
+  onData: applyFirebaseData
+});
+
+
+function currentAccountId() {
+  if (!state.profile.accountId) {
+    state.profile.accountId = uid('acct');
+    state.profile.createdAt ||= new Date().toISOString();
+    persist();
+  }
+  return state.profile.accountId;
+}
+
+function currentUserName() {
+  return state.profile.name || state.members[0]?.name || 'เพื่อน';
+}
+
+function currentUserRoleLabel() {
+  return state.profile.isAdmin ? 'Admin' : 'Member';
+}
+
+function currentUserBadge() {
+  return state.profile.isAdmin ? '👑 Admin' : '🙋 Member';
+}
+
+function isActiveItem(item) {
+  return item && item.deleted !== true;
+}
+
+function activeList(key) {
+  return (state[key] || []).filter(isActiveItem);
+}
+
+function currentActorMeta() {
+  return {
+    author: currentUserName(),
+    accountId: currentAccountId()
+  };
+}
+
+function canManageItem(item = {}) {
+  const accountId = currentAccountId();
+  const name = currentUserName();
+  return Boolean(
+    state.profile.isAdmin ||
+    item.accountId === accountId ||
+    item.authorId === accountId ||
+    item.createdById === accountId ||
+    item.deletedById === accountId ||
+    item.author === name ||
+    item.createdBy === name
+  );
+}
+
+function liveStorageLabel(item = {}) {
+  if (item.deleted) return 'Deleted';
+  return item.storage === 'firebase' ? 'Live' : item.storage === 'drive' ? 'Drive' : 'Local';
+}
+
+function ensureCollection(key) {
+  if (!Array.isArray(state[key])) state[key] = [];
+  return state[key];
+}
+
+function ensureMomentActive(momentId) {
+  return activeList('moments').some(item => item.id === momentId);
+}
+
+function ensureProfileAccount() {
+  currentAccountId();
+  const now = new Date().toISOString();
+  const account = {
+    id: state.profile.accountId,
+    name: currentUserName(),
+    role: state.profile.role || 'สายคอนเทนต์',
+    color: state.profile.color || '#0f6b5e',
+    isAdmin: Boolean(state.profile.isAdmin),
+    updatedAt: now,
+    createdAt: state.profile.createdAt || now,
+    storage: 'local'
+  };
+  state.accounts ||= [];
+  const index = state.accounts.findIndex(a => a.id === account.id);
+  if (index >= 0) state.accounts[index] = { ...state.accounts[index], ...account };
+  else state.accounts.push(account);
+  return account;
+}
+
+function activeReactionFor(momentId) {
+  const accountId = currentAccountId();
+  return uniqueActiveReactions((state.reactions || []).filter(r => r.momentId === momentId))
+    .find(r => r.accountId === accountId || (!r.accountId && r.author === currentUserName()));
+}
+
+function applyAdminDriveSettings(record) {
+  if (!record) return false;
+  let changed = false;
+  if (record.driveClientId && record.driveClientId !== state.settings.driveClientId) { state.settings.driveClientId = record.driveClientId; changed = true; }
+  if (record.driveRootFolderId && record.driveRootFolderId !== state.settings.driveRootFolderId) { state.settings.driveRootFolderId = record.driveRootFolderId; changed = true; }
+  if (record.driveRootFolderName && record.driveRootFolderName !== state.settings.driveRootFolderName) { state.settings.driveRootFolderName = record.driveRootFolderName; changed = true; }
+  if (record.adminDriveOwner) state.settings.adminDriveOwner = record.adminDriveOwner;
+  if (record.updatedAt) state.settings.adminDriveSharedAt = record.updatedAt;
+  if (changed) {
+    state.settings.driveChildren = {};
+    state.settings.collectionSyncAt = {};
+  }
+  return changed;
+}
+
+async function publishAdminDriveSettings() {
+  if (!state.profile.isAdmin) return toast('เฉพาะ Admin เท่านั้นที่เผยแพร่ Drive Hub ให้เพื่อนได้');
+  if (!state.settings.driveClientId || !state.settings.driveRootFolderId) return toast('ใส่ Google OAuth Client ID และ Drive Folder ID ก่อน');
+  const now = new Date().toISOString();
+  const record = {
+    id: 'admin-drive-hub',
+    driveClientId: state.settings.driveClientId,
+    driveRootFolderId: state.settings.driveRootFolderId,
+    driveRootFolderName: state.settings.driveRootFolderName,
+    adminDriveOwner: currentUserName(),
+    createdAt: state.settings.adminDriveSharedAt || now,
+    updatedAt: now,
+    storage: 'local'
+  };
+  state.tripSettings ||= [];
+  const index = state.tripSettings.findIndex(x => x.id === record.id);
+  if (index >= 0) state.tripSettings[index] = { ...state.tripSettings[index], ...record };
+  else state.tripSettings.push(record);
+  state.settings.adminDriveOwner = record.adminDriveOwner;
+  state.settings.adminDriveSharedAt = now;
+  persist();
+  await uploadRecordIfConnected('tripSettings', record);
+  toast('เผยแพร่ Drive Hub ของ Admin ให้ทุกบัญชีแล้ว');
+  render();
+}
 
 const NAV = [
   ['home', '🏕️', 'Home'],
@@ -116,6 +262,9 @@ const SAFE_REMINDERS = [
   'ถ้าแยกกัน ให้มีจุดนัดพบและเวลาเช็กอินชัดเจน'
 ];
 
+const PACKING_ITEMS = ['เสื้อผ้า', 'ผ้าเช็ดตัว', 'ยากันยุง', 'Power bank', 'ถุงกันน้ำ', 'รองเท้าแตะ/ลุยน้ำ', 'ยาประจำตัว', 'ไฟฉาย', 'สายชาร์จ', 'ลำโพงพกพา'];
+
+
 init();
 
 function init() {
@@ -132,13 +281,32 @@ function init() {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && drive.connected && state.settings.liveSyncEnabled) syncDrive({ silent: true }).catch(console.warn);
   });
+  if (!state.profile.accountId) currentAccountId();
+  if (!state.profile.name) state.accountModalOpen = true;
   render();
-  setTimeout(autoConnectDriveOnStart, 500);
+  setTimeout(autoConnectFirebaseOnStart, 350);
+  setTimeout(autoConnectDriveOnStart, 800);
 }
 
 
 function persist() {
   saveState(state);
+}
+
+async function autoConnectFirebaseOnStart() {
+  if (!state.settings.firebaseEnabled) return;
+  try {
+    syncStatus = { text: 'กำลังเปิด Firebase Live Feed…', tone: 'info' };
+    renderSyncStatusOnly();
+    await firebase.connect({ listen: true });
+    await uploadPendingSocialRecords({ silent: true });
+  } catch (error) {
+    console.warn('Firebase auto connect skipped:', error);
+    state.settings.lastFirebaseError = error.message || String(error);
+    syncStatus = { text: 'แตะ Connect Firebase เพื่อลองใหม่', tone: 'idle' };
+    persist();
+    renderSyncStatusOnly();
+  }
 }
 
 async function autoConnectDriveOnStart() {
@@ -162,9 +330,11 @@ async function autoConnectDriveOnStart() {
 function startSyncLoop() {
   stopSyncLoop();
   if (!state.settings.liveSyncEnabled) return;
-  const interval = Math.max(20, Number(state.settings.syncIntervalSec || 45)) * 1000;
+  const interval = Math.max(15, Number(state.settings.syncIntervalSec || 20)) * 1000;
+  nextSyncAt = Date.now() + interval;
   syncTimer = setInterval(() => {
     if (!document.hidden && drive.connected && !isSyncing) {
+      nextSyncAt = Date.now() + interval;
       syncDrive({ silent: true, uploadPendingFirst: true }).catch(console.warn);
     }
   }, interval);
@@ -176,11 +346,12 @@ function stopSyncLoop() {
 }
 
 function syncSummary() {
-  const last = state.settings.lastSyncAt ? `ซิงก์ล่าสุด ${formatThaiDate(state.settings.lastSyncAt)}` : 'ยังไม่เคยซิงก์ Drive Hub';
+  const last = state.settings.lastSyncAt ? `Drive sync ล่าสุด ${formatThaiDate(state.settings.lastSyncAt)}` : 'Drive ยังไม่เคย sync';
   const pending = countPendingRecords();
-  const mode = state.settings.syncMode === 'drive-first' ? 'Drive เป็นศูนย์กลาง' : 'Local';
+  const mode = state.settings.firebaseEnabled ? 'Firebase Live Feed + Drive Media' : state.settings.syncMode === 'drive-first' ? 'Drive Hub' : 'Local';
+  const live = firebase.connected ? ' · realtime on' : state.settings.liveSyncEnabled ? ` · drive poll ${Number(state.settings.syncIntervalSec || 20)}s` : '';
   const statusText = syncStatus?.text ? ` · ${syncStatus.text}` : '';
-  return `${mode} · ${last} · pending ${pending}${statusText}`;
+  return `${mode}${live} · ${last} · pending ${pending}${statusText}`;
 }
 
 function renderSyncStatusOnly() {
@@ -190,12 +361,14 @@ function renderSyncStatusOnly() {
 
 function countPendingRecords() {
   let count = 0;
-  for (const key of ['members', 'moments', 'reactions', 'votes', 'quotes', 'expenses']) {
-    count += (state[key] || []).filter(item => item.storage !== 'drive').length;
+  for (const key of ['accounts', 'tripSettings', 'members', 'moments', 'reactions', 'comments', 'votes', 'quotes', 'expenses']) {
+    count += (state[key] || []).filter(item => !['drive','firebase'].includes(item.storage)).length;
   }
   count += (state.moments || []).filter(item => (item.media || []).some(media => media.pendingUpload)).length;
-  count += (state.questEvents || []).filter(item => item.storage !== 'drive').length;
-  if (state.bingo && state.bingo.storage !== 'drive') count += 1;
+  count += (state.questEvents || []).filter(item => !['drive','firebase'].includes(item.storage)).length;
+  if (state.bingo && !['drive','firebase'].includes(state.bingo.storage)) count += 1;
+  if (state.secretBuddy && !['drive','firebase'].includes(state.secretBuddy.storage)) count += 1;
+  if (state.checklist?.updatedAt && !['drive','firebase'].includes(state.checklist.storage)) count += 1;
   return count;
 }
 
@@ -214,11 +387,11 @@ function render() {
         <div class="brand">
           <div class="brand-badge">📖</div>
           <h1>${escapeHtml(state.trip.title || state.appName)}</h1>
-          <p>${escapeHtml(state.trip.subtitle || 'สมุดความทรงจำประจำแก๊ง')}</p>
+          <p>${escapeHtml(state.trip.subtitle || 'สมุดความทรงจำประจำแก๊ง')}</p><div class="account-mini"><span>${currentUserBadge()}</span><b>${escapeHtml(currentUserName())}</b></div>
         </div>
         <nav class="nav">${renderNav()}</nav>
         <div class="sync-pill ${drive.connected ? 'connected' : ''}" id="syncPill">
-          <strong>${drive.connected ? '🟢 Drive Hub Connected' : '⚪ Drive-first: รอเชื่อมต่อ'}</strong>
+          <strong>${firebase.connected ? '🟢 Firebase Live Feed' : drive.connected ? '🟢 Drive Media Connected' : '⚪ รอเชื่อมต่อ Hub'}</strong>
           <span>${syncSummary()}</span>
         </div>
       </aside>
@@ -229,7 +402,7 @@ function render() {
             <p>${title.desc}</p>
           </div>
           <div class="action-row">
-            <button class="btn accent" data-action="quick-moment">＋ เพิ่มโมเมนต์</button>
+            <button class="btn ghost" data-action="open-account">${currentUserBadge()}</button><button class="btn accent" data-action="quick-moment">＋ เพิ่มโมเมนต์</button>
             <button class="btn" data-action="sync-drive">☁️ Sync Hub</button>
           </div>
         </div>
@@ -238,6 +411,8 @@ function render() {
       <nav class="mobile-nav">${renderMobileNav()}</nav>
     </div>
     ${reel.open ? renderReel() : ''}
+    ${composer.open ? renderComposerModal() : ''}
+    ${state.accountModalOpen ? renderAccountModal() : ''}
   `;
   hydrateMediaInDOM();
 }
@@ -280,7 +455,7 @@ function renderPage() {
 
 function renderHome() {
   const done = Object.keys(state.questsDone || {}).length;
-  const moments = state.moments.length;
+  const moments = activeList('moments').length;
   const score = scoreFromState(state);
   const topQuests = QUESTS.filter(q => !state.questsDone[q.id]).slice(0, 4);
   return `
@@ -304,7 +479,7 @@ function renderHome() {
       </div>
 
       <div class="grid three">
-        <div class="card kpi"><b>${state.members.length}</b><span>สมาชิกแก๊ง</span></div>
+        <div class="card kpi"><b>${activeList('members').length}</b><span>สมาชิกแก๊ง</span></div>
         <div class="card kpi"><b>${moments}</b><span>โมเมนต์ในสมุด</span></div>
         <div class="card kpi"><b>${score}</b><span>คะแนนรวมทริป</span></div>
       </div>
@@ -328,82 +503,117 @@ function renderHome() {
 }
 
 function renderMembers() {
-  if (!state.members.length) return '<div class="empty">ยังไม่มีสมาชิก เพิ่มชื่อเพื่อนก่อนเริ่มเล่นเกม</div>';
-  return `<div class="member-list">${state.members.map(m => `
+  const members = activeList('members');
+  if (!members.length) return '<div class="empty">ยังไม่มีสมาชิก เพิ่มชื่อเพื่อนก่อนเริ่มเล่นเกม</div>';
+  return `<div class="member-list">${members.map(m => `
     <span class="member-chip">
       <span class="avatar" style="background:${escapeAttr(m.color || '#0f6b5e')}">${escapeHtml(initials(m.name))}</span>
       <span>${escapeHtml(m.name)}</span>
+      ${canManageItem(m) ? `<button class="mini-link danger" data-action="delete-member" data-id="${escapeAttr(m.id)}">ลบ</button>` : ''}
     </span>
   `).join('')}</div>`;
 }
 
 function renderFeed() {
-  const sorted = [...state.moments].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const sorted = activeList('moments').sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const stories = sorted.filter(m => (m.media || []).length).slice(0, 10);
   return `
-    <section class="grid two">
-      <form class="card pad stack" data-form="moment">
-        <h3>＋ เพิ่มโมเมนต์ / เช็กอิน</h3>
-        <div class="grid two">
-          <div class="field"><label>ชื่อคนโพสต์</label>${memberSelect('author', state.profile.name || state.members[0]?.name || '')}</div>
-          <div class="field"><label>ประเภท</label>
-            <select class="select" name="type">
-              <option value="moment">โมเมนต์</option>
-              <option value="checkin">เช็กอิน</option>
-              <option value="quote">Quote เด็ด</option>
-            </select>
-          </div>
-        </div>
-        <div class="field"><label>แคปชัน / สิ่งที่อยากจำ</label><textarea class="textarea" name="caption" required placeholder="เช่น คืนนี้บนแพคือที่สุด / รูปนี้ห้ามหาย / ถึงยังวะ"></textarea></div>
-        <div class="grid two">
-          <div class="field"><label>สถานที่</label><input class="input" name="place" placeholder="เขื่อนเขาแหลม / สะพานมอญ" /></div>
-          <div class="field"><label>อารมณ์</label>
-            <select class="select" name="mood">
-              <option>ตำนาน</option><option>ฮา</option><option>ซึ้ง</option><option>วิวสวย</option><option>เหนื่อยแต่คุ้ม</option><option>ไม่ควรหลุด</option>
-            </select>
-          </div>
-        </div>
-        <div class="field"><label>รูป/วิดีโอทั้งอัลบั้ม (เก็บเต็มความละเอียด)</label><input class="input" name="media" type="file" accept="image/*,video/*" multiple /></div>
-        <button class="btn primary full" type="submit">บันทึกลงสมุด</button>
-        <p class="small muted">รองรับหลายรูป/หลายวิดีโอในโพสต์เดียว อัปโหลดขึ้น Drive ด้วยไฟล์ต้นฉบับเต็มความละเอียด ไม่บีบอัด ไม่ลดขนาด ถ้ายังไม่เชื่อม Drive จะเก็บไฟล์เต็มไว้ในเครื่องก่อนเพื่อรออัปโหลด</p>
-      </form>
-
-      <div class="glass pad stack">
-        <h3>Drive Hub Control</h3>
-        <button class="btn accent full" data-action="sync-drive">☁️ Sync ทุกข้อมูลจาก Drive</button>
-        <button class="btn full" data-action="upload-pending">⬆️ ส่ง Local pending เข้า Drive Hub</button>
-        <button class="btn full" data-action="open-reel">🎞️ นำเสนอเป็น Memory Reel</button>
-        <div class="code">Mode: Drive-first + Local cache<br>Folder ID: ${escapeHtml(state.settings.driveRootFolderId || 'ยังไม่ได้ตั้งค่า')}<br>${escapeHtml(syncSummary())}</div>
+    <section class="insta-shell">
+      <div class="stories-row card pad">
+        <button class="story add-story" data-action="open-composer">
+          <span>＋</span><b>เพิ่มโมเมนต์</b>
+        </button>
+        ${stories.map(m => `
+          <button class="story" data-action="toggle-feature" data-id="${escapeAttr(m.id)}">
+            <span class="story-ring">${renderStoryThumb(m)}</span>
+            <b>${escapeHtml((m.author || 'เพื่อน').slice(0, 12))}</b>
+          </button>
+        `).join('') || `<div class="story muted-story"><span>📸</span><b>ยังไม่มี Story</b></div>`}
       </div>
-    </section>
-    <section class="grid" style="margin-top:16px">
-      <div class="spread"><h3>Memory Wall</h3><span class="tag">${sorted.length} posts</span></div>
-      <div class="feed">${sorted.map(renderMomentCard).join('') || '<div class="card empty">ยังไม่มีโมเมนต์ ลองเพิ่มรูปแรกของทริปเลย 📸</div>'}</div>
+
+      <div class="feed-toolbar glass pad">
+        <div>
+          <h3>กาญนะจ๊ะบุรี Social</h3>
+          <p class="muted-light">IG-style private feed ของทริป: Stories, Album post, caption, comment, reaction คนละ 1 ครั้ง และ Vlog save</p>
+        </div>
+        <div class="action-row">
+          <button class="btn accent" data-action="open-composer">＋ เพิ่มโมเมนต์</button>
+          <button class="btn" data-action="connect-firebase">⚡ Connect Firebase</button>
+          <button class="btn" data-action="connect-drive">☁️ Connect Drive</button>
+        </div>
+      </div>
+
+      <div class="feed insta-feed">
+        ${sorted.map(renderMomentCard).join('') || '<div class="card empty">ยังไม่มีโพสต์ กด “เพิ่มโมเมนต์” เพื่อเปิดอัลบั้มแรกของทริป 📸</div>'}
+      </div>
     </section>
   `;
 }
 
+function renderStoryThumb(moment) {
+  const media = (moment.media || [])[0];
+  if (!media) return '<span>📍</span>';
+  if (media.localDataUrl && media.mimeType?.startsWith('image/')) return `<img src="${escapeAttr(media.localDataUrl)}" alt="story" />`;
+  if (media.thumbnailLink) return `<img src="${escapeAttr(media.thumbnailLink)}" alt="story" />`;
+  if (media.mimeType?.startsWith('video/')) return '<span>▶️</span>';
+  return '<span>📸</span>';
+}
+
 function renderMomentCard(moment) {
   const mediaList = Array.isArray(moment.media) ? moment.media : [];
-  const typeIcon = moment.type === 'checkin' ? '📍' : moment.type === 'quote' ? '💬' : '📸';
+  const typeIcon = moment.type === 'checkin' ? '📍' : moment.type === 'quote' ? '💬' : moment.type === 'game' ? '🎲' : moment.type === 'quest' ? '🧭' : moment.type === 'secret' ? '🕵️' : moment.type === 'vote' ? '🏆' : '📸';
   const mediaHtml = renderAlbumMedia(mediaList, moment.id);
-  const reactions = (state.reactions || []).filter(r => r.momentId === moment.id);
+  const reactions = uniqueActiveReactions((state.reactions || []).filter(r => r.momentId === moment.id));
   const reactionText = reactionSummary(reactions);
-  const albumText = mediaList.length ? `อัลบั้ม ${mediaList.length} ไฟล์ · Full resolution` : 'ข้อความ/เช็กอิน';
+  const albumText = mediaList.length ? `${mediaList.length} ไฟล์ · original full resolution` : 'text post';
+  const canDelete = canManageItem(moment);
   return `
-    <article class="card moment-card">
-      <div class="moment-media album-shell">${mediaHtml}</div>
-      <div class="moment-body">
-        <div class="spread"><span class="tag">${typeIcon} ${escapeHtml(moment.mood || 'โมเมนต์')}</span><span class="small muted">${formatThaiDate(moment.createdAt)}</span></div>
-        <h3>${escapeHtml(moment.caption || 'Untitled Moment')}</h3>
-        <p>${escapeHtml(moment.place || 'ไม่ระบุสถานที่')} · โดย ${escapeHtml(moment.author || 'ไม่ระบุชื่อ')}</p>
-        <p class="small muted">${escapeHtml(albumText)}</p>
-        <div class="inline">
-          ${['555', 'ตำนาน', 'โคตรวิว', 'เซฟไว้'].map(emoji => `<button class="btn ghost" data-action="react" data-id="${moment.id}" data-emoji="${emoji}">${emoji}</button>`).join('')}
-          ${mediaList.length ? `<button class="btn ghost" data-action="download-album" data-id="${moment.id}">⬇️ บันทึกทั้งอัลบั้ม</button>` : ''}
+    <article class="card moment-card insta-card">
+      <header class="post-head">
+        <span class="avatar" style="background:${escapeAttr(memberColor(moment.author))}">${escapeHtml(initials(moment.author || 'เพื่อน'))}</span>
+        <div>
+          <b>${escapeHtml(moment.author || 'ไม่ระบุชื่อ')}</b>
+          <p>${typeIcon} ${escapeHtml(moment.place || moment.mood || 'กาญนะจ๊ะบุรี')} · ${formatThaiDate(moment.createdAt)}</p>
         </div>
-        ${reactionText ? `<p class="small muted">${reactionText}</p>` : ''}
+        <span class="post-chip">${liveStorageLabel(moment)}</span>
+        ${canDelete ? `<button class="icon-btn danger" title="ลบโพสต์นี้" data-action="delete-moment" data-id="${escapeAttr(moment.id)}">🗑️</button>` : ''}
+      </header>
+      <div class="moment-media album-shell">${mediaHtml}</div>
+      <div class="moment-body insta-body">
+        <div class="post-actions">
+          ${['❤️', '😂', '🔥', '😍'].map(emoji => `<button class="icon-btn ${activeReactionFor(moment.id)?.emoji === emoji ? 'reacted' : ''}" title="React ได้คนละ 1 ครั้ง เปลี่ยนได้" data-action="react" data-id="${moment.id}" data-emoji="${emoji}">${emoji}</button>`).join('')}
+          <button class="icon-btn" data-action="toggle-feature" data-id="${moment.id}">${moment.featured ? '⭐' : '☆'}</button>
+          <button class="icon-btn" data-action="open-composer" data-source="remix" data-caption="${escapeAttr('โมเมนต์ต่อจาก: ' + (moment.caption || ''))}" data-place="${escapeAttr(moment.place || '')}">＋</button>
+          ${mediaList.length ? `<button class="icon-btn right" data-action="download-album" data-id="${moment.id}">⬇️</button>` : ''}
+        </div>
+        ${reactionText ? `<p class="like-line"><b>${reactionText}</b> <span class="muted">· ${reactions.length} reaction</span></p>` : ''}
+        <p class="caption-line"><b>${escapeHtml(moment.author || 'เพื่อน')}</b> ${escapeHtml(moment.caption || 'Untitled Moment')}</p>
+        <p class="small muted">${escapeHtml(albumText)} ${moment.featured ? '· อยู่ใน Vlog Studio' : ''}</p>
+        ${renderComments(moment.id)}
       </div>
     </article>
+  `;
+}
+
+function memberColor(name) {
+  return (state.members || []).find(m => m.name === name)?.color || '#0f6b5e';
+}
+
+function renderComments(momentId) {
+  const comments = (state.comments || [])
+    .filter(c => c.momentId === momentId && !c.deleted)
+    .sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+  const preview = comments.slice(-6);
+  const moreText = comments.length > preview.length ? `<div class="small muted">มีคอมเมนต์ก่อนหน้าอีก ${comments.length - preview.length} รายการ</div>` : '';
+  return `
+    <div class="comments-box">
+      ${moreText}
+      ${preview.map(c => `<div class="comment-line"><b>${escapeHtml(c.author || 'เพื่อน')}</b><span>${escapeHtml(c.text || '')}</span>${canManageItem(c) ? `<button class="mini-link danger" data-action="delete-comment" data-id="${escapeAttr(c.id)}">ลบ</button>` : ''}</div>`).join('')}
+      <form class="comment-form" data-form="comment" data-moment-id="${escapeAttr(momentId)}">
+        <input class="input" name="text" placeholder="คอมเมนต์ / แซวเพื่อน / เพิ่มบริบทของรูปนี้" required />
+        <button class="btn primary" type="submit">ส่ง</button>
+      </form>
+    </div>
   `;
 }
 
@@ -443,6 +653,87 @@ function renderMedia(media) {
   return '<span>ไฟล์นี้อยู่ใน Drive/เครื่องอื่น</span>';
 }
 
+
+function renderAccountModal() {
+  const accountId = currentAccountId();
+  return `
+    <div class="modal-backdrop" data-action="close-account">
+      <div class="composer-modal card account-modal" role="dialog" aria-modal="true" aria-label="บัญชีของฉัน" onclick="event.stopPropagation()">
+        <div class="composer-head">
+          <div>
+            <h3>บัญชีของฉัน</h3>
+            <p class="muted">ทุกคนมีบัญชีแยกกัน ใช้สำหรับโพสต์ คอมเมนต์ และจำกัด reaction คนละ 1 ครั้งต่อโมเมนต์</p>
+          </div>
+          <button class="icon-btn" data-action="close-account">✕</button>
+        </div>
+        <form class="stack" data-form="profile">
+          <div class="profile-card-preview">
+            <span class="avatar big" style="background:${escapeAttr(state.profile.color || '#0f6b5e')}">${escapeHtml(initials(currentUserName()))}</span>
+            <div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · ID ${escapeHtml(accountId.slice(-8))}</p></div>
+          </div>
+          <div class="grid two">
+            <div class="field"><label>ชื่อบัญชี / ชื่อเล่น</label><input class="input" name="name" required value="${escapeAttr(state.profile.name || '')}" placeholder="เช่น ต้น" /></div>
+            <div class="field"><label>คาแรกเตอร์</label><select class="select" name="role">${['สายคอนเทนต์','สายฮา','สายกิน','สายหลับ','สายเปย์','สายไกด์','สายถ่ายรูป','สายดูแลเพื่อน'].map(x => `<option ${state.profile.role === x ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+            <div class="field"><label>สีประจำตัว</label><input class="input" name="color" type="color" value="${escapeAttr(state.profile.color || '#0f6b5e')}" /></div>
+            <div class="field"><label>สิทธิ์</label><select class="select" name="isAdmin"><option value="false" ${!state.profile.isAdmin ? 'selected' : ''}>Member</option><option value="true" ${state.profile.isAdmin ? 'selected' : ''}>Admin</option></select></div>
+          </div>
+          <div class="social-note"><b>Admin Drive Hub:</b> Admin สามารถเผยแพร่ Drive Client ID + Folder ID ผ่าน Firebase ให้ทุกคนรับค่าอัตโนมัติได้ แต่ Google ไม่อนุญาตให้แชร์ OAuth token ของ Admin ไปยังเครื่องเพื่อนแบบปลอดภัย ถ้าจะอัปโหลดเข้า Drive โดยตรง ผู้ใช้ยังต้อง authorize Google บนเครื่องตัวเองหรือใช้ Firebase Storage/Cloud Functions เพิ่ม</div>
+          <button class="btn primary full" type="submit">บันทึกบัญชี</button>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
+function renderComposerModal() {
+  const isGame = composer.source === 'game';
+  const isQuest = composer.source === 'quest';
+  return `
+    <div class="modal-backdrop" data-action="close-composer">
+      <div class="composer-modal card" role="dialog" aria-modal="true" aria-label="เพิ่มโมเมนต์" onclick="event.stopPropagation()">
+        <div class="composer-head">
+          <div>
+            <h3>${isGame ? 'โพสต์โมเมนต์จากเกม' : isQuest ? 'โพสต์หลักฐานภารกิจ' : 'สร้างโพสต์ใหม่'}</h3>
+            <p class="muted">อัปโหลดรูป/วิดีโอได้ทั้งอัลบั้ม เก็บไฟล์ต้นฉบับเต็มความละเอียดใน Google Drive และส่งโพสต์เข้า Firebase Feed</p>
+          </div>
+          <button class="icon-btn" data-action="close-composer">✕</button>
+        </div>
+        <form class="stack" data-form="moment">
+          <input type="hidden" name="source" value="${escapeAttr(composer.source)}" />
+          <div class="grid two">
+            <div class="field"><label>บัญชีที่โพสต์</label><input class="input" name="author" value="${escapeAttr(currentUserName())}" readonly /></div>
+            <div class="field"><label>ประเภทโพสต์</label>
+              <select class="select" name="type">
+                <option value="moment" ${composer.type === 'moment' ? 'selected' : ''}>โมเมนต์</option>
+                <option value="checkin" ${composer.type === 'checkin' ? 'selected' : ''}>เช็กอิน</option>
+                <option value="game" ${composer.type === 'game' ? 'selected' : ''}>โมเมนต์จากเกม</option>
+                <option value="quest" ${composer.type === 'quest' ? 'selected' : ''}>หลักฐานภารกิจ</option>
+                <option value="quote" ${composer.type === 'quote' ? 'selected' : ''}>Quote เด็ด</option>
+              </select>
+            </div>
+          </div>
+          ${isGame ? `<div class="game-preview"><span>🎲</span><b>${escapeHtml(composer.gameCard || 'Game Moment')}</b></div>` : ''}
+          ${isQuest ? `<div class="game-preview"><span>🧭</span><b>${escapeHtml(composer.questTitle || 'Quest Moment')}</b></div>` : ''}
+          <input type="hidden" name="sourceQuestId" value="${escapeAttr(composer.questId || '')}" />
+          <input type="hidden" name="sourceQuestTitle" value="${escapeAttr(composer.questTitle || '')}" />
+          <div class="field"><label>แคปชัน</label><textarea class="textarea" name="caption" required placeholder="เขียนแคปชันแบบลง IG / เล่าโมเมนต์นี้ให้เพื่อนจำ">${escapeHtml(composer.caption || composer.gameCard || '')}</textarea></div>
+          <div class="grid two">
+            <div class="field"><label>สถานที่ / เช็กอิน</label><input class="input" name="place" value="${escapeAttr(composer.place || (isGame ? 'เกมบนแพ' : isQuest ? 'ภารกิจแก๊ง' : ''))}" placeholder="เขื่อนเขาแหลม / สะพานมอญ / บนแพ" /></div>
+            <div class="field"><label>อารมณ์</label>
+              <select class="select" name="mood">
+                ${['ตำนาน','ฮา','ซึ้ง','วิวสวย','เหนื่อยแต่คุ้ม','ไม่ควรหลุด','เกมบนแพ'].map(m => `<option ${composer.mood === m ? 'selected' : ''}>${m}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="field"><label>รูป/วิดีโอทั้งอัลบั้ม</label><input class="input" name="media" type="file" accept="image/*,video/*" multiple /></div>
+          <div class="composer-tip">ไฟล์สื่อจะถูกเก็บใน Google Drive แบบเต็มความละเอียด ไม่บีบอัด ส่วนข้อมูลโพสต์/คอมเมนต์/รีแอคจะเข้า Firebase เพื่อให้ Feed อัปเดตเร็วแบบโซเชียล</div>
+          <button class="btn primary full" type="submit">แชร์ลง Feed</button>
+        </form>
+      </div>
+    </div>
+  `;
+}
+
 function renderQuest() {
   const groups = groupBy(QUESTS, q => q.day);
   return `
@@ -469,12 +760,13 @@ function renderQuestCard(q) {
         <div class="quest-emoji">${q.emoji}</div>
         <div><h4 class="quest-title">${escapeHtml(q.title)}</h4><p class="quest-desc">${escapeHtml(q.desc)}</p></div>
       </div>
-      <div class="spread"><span class="tag">${escapeHtml(q.type)} · +${q.xp} XP</span><button class="btn ${done ? 'ghost' : 'primary'}" data-action="toggle-quest" data-id="${q.id}">${done ? 'ทำแล้ว ✓' : 'ทำสำเร็จ'}</button></div>
+      <div class="spread"><span class="tag">${escapeHtml(q.type)} · +${q.xp} XP</span><div class="action-row tight"><button class="btn ${done ? 'ghost' : 'primary'}" data-action="toggle-quest" data-id="${q.id}">${done ? 'ทำแล้ว ✓' : 'ทำสำเร็จ'}</button><button class="btn ghost" data-action="open-quest-composer" data-id="${q.id}">โพสต์หลักฐาน</button></div></div>
     </div>
   `;
 }
 
 function renderGames() {
+  const voteList = activeList('votes').sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   return `
     <section class="grid two">
       <div class="card pad stack">
@@ -494,7 +786,7 @@ function renderGames() {
           </div>
         </div>
         <button class="btn accent full" data-action="draw-card">เปิดการ์ด</button>
-        <button class="btn full" data-action="save-game-moment">บันทึกการ์ดนี้เป็นโมเมนต์</button>
+        <button class="btn full" data-action="open-game-composer">โพสต์โมเมนต์เกมนี้ลง Feed</button>
       </div>
 
       <div class="card pad stack">
@@ -514,13 +806,13 @@ function renderGames() {
         <div class="field" style="grid-column:1/-1"><label>เหตุผล</label><input class="input" name="reason" placeholder="เพราะขึ้นรถ 5 นาทีหลับเลย" /></div>
         <button class="btn primary" type="submit">บันทึกผลโหวต</button>
       </form>
-      ${state.votes.slice(-5).reverse().map(v => `<div class="quest-card"><b>${escapeHtml(v.title)}</b><p class="quest-desc">ผู้ชนะ: ${escapeHtml(v.winner)} — ${escapeHtml(v.reason || '')}</p></div>`).join('')}
+      ${voteList.slice(0, 12).map(v => `<div class="quest-card"><div class="spread"><b>${escapeHtml(v.title)}</b>${canManageItem(v) ? `<button class="btn danger compact-btn" data-action="delete-vote" data-id="${escapeAttr(v.id)}">ลบ</button>` : ''}</div><p class="quest-desc">ผู้ชนะ: ${escapeHtml(v.winner)} — ${escapeHtml(v.reason || '')}</p><p class="small muted">โดย ${escapeHtml(v.author || v.createdBy || 'แก๊งนี้')} · ${formatThaiDate(v.createdAt)}</p></div>`).join('') || '<div class="empty">ยังไม่มีผลโหวต</div>'}
     </section>
   `;
 }
 
 function renderSecretBuddy() {
-  if (!state.members.length) return '<div class="empty">เพิ่มสมาชิกก่อน แล้วค่อยสุ่มภารกิจลับ</div>';
+  if (!activeList('members').length) return '<div class="empty">เพิ่มสมาชิกก่อน แล้วค่อยสุ่มภารกิจลับ</div>';
   if (!state.secretBuddy) return '<div class="empty">ยังไม่ได้สุ่ม Secret Buddy วันนี้</div>';
   return `
     <div class="quest-card">
@@ -540,8 +832,10 @@ function renderBingo() {
 }
 
 function renderRecap() {
-  const bestMoments = [...state.moments].slice(-9).reverse();
-  const quoteList = state.quotes.slice(-8).reverse();
+  const activeMoments = activeList('moments');
+  const featuredMoments = activeMoments.filter(m => m.featured).sort((a,b) => new Date(a.createdAt) - new Date(b.createdAt));
+  const bestMoments = (featuredMoments.length ? featuredMoments : [...activeMoments].slice(-9).reverse()).slice(0, 12);
+  const quoteList = activeList('quotes').slice(-8).reverse();
   const doneCount = Object.keys(state.questsDone || {}).length;
   return `
     <section class="grid">
@@ -557,13 +851,14 @@ function renderRecap() {
         </div>
       </div>
       <div class="grid three">
-        <div class="card kpi"><b>${state.moments.length}</b><span>โมเมนต์</span></div>
+        <div class="card kpi"><b>${activeMoments.length}</b><span>โมเมนต์</span></div>
         <div class="card kpi"><b>${doneCount}</b><span>เควสต์สำเร็จ</span></div>
-        <div class="card kpi"><b>${state.votes.length}</b><span>ผลโหวต</span></div>
+        <div class="card kpi"><b>${activeList('votes').length}</b><span>ผลโหวต</span></div>
+        <div class="card kpi"><b>${featuredMoments.length}</b><span>โมเมนต์เข้า Vlog</span></div>
       </div>
       <div class="grid two">
         <div class="card pad stack">
-          <h3>รูป/โมเมนต์ล่าสุด</h3>
+          <h3>Vlog Studio / โมเมนต์เด่น</h3><p class="muted">กด ☆ เก็บเข้า Vlog ใน Feed เพื่อเลือกโมเมนต์เด่น ระบบจะใช้กลุ่มนี้ก่อนสร้าง Memory Reel</p>
           <div class="feed">${bestMoments.map(renderMomentCard).join('') || '<div class="empty">ยังไม่มีรูปสำหรับ Recap</div>'}</div>
         </div>
         <div class="card pad stack">
@@ -572,7 +867,7 @@ function renderRecap() {
             <input class="input" name="text" required placeholder="เช่น รูปนี้อย่าลงนะ" style="flex:1; min-width:220px" />
             <button class="btn primary">เพิ่ม Quote</button>
           </form>
-          ${quoteList.map(q => `<div class="quest-card"><b>“${escapeHtml(q.text)}”</b><p class="quest-desc">โดย ${escapeHtml(q.author || 'แก๊งนี้')} · ${formatThaiDate(q.createdAt)}</p></div>`).join('') || '<div class="empty">ยังไม่มี Quote เด็ด</div>'}
+          ${quoteList.map(q => `<div class="quest-card"><div class="spread"><b>“${escapeHtml(q.text)}”</b>${canManageItem(q) ? `<button class="btn danger compact-btn" data-action="delete-quote" data-id="${escapeAttr(q.id)}">ลบ</button>` : ''}</div><p class="quest-desc">โดย ${escapeHtml(q.author || 'แก๊งนี้')} · ${formatThaiDate(q.createdAt)}</p></div>`).join('') || '<div class="empty">ยังไม่มี Quote เด็ด</div>'}
         </div>
       </div>
     </section>
@@ -580,27 +875,51 @@ function renderRecap() {
 }
 
 function renderTools() {
-  const total = state.expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const expenseList = activeList('expenses').sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  const total = expenseList.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   return `
     <section class="grid two">
       <div class="card pad stack">
-        <h3>☁️ Google Drive Sync</h3>
-        <p class="muted">ใช้ Google Drive เป็นศูนย์กลางข้อมูลของทริป ทุกคนที่มีสิทธิ์ Editor ในโฟลเดอร์เดียวกันจะเห็น Feed, สมาชิก, โหวต, Quote, ค่าใช้จ่าย, Quest และ Bingo ร่วมกัน</p>
+        <h3>⚡ Social Hub: Firebase + Google Drive</h3>
+        <div class="profile-card-preview compact"><span class="avatar" style="background:${escapeAttr(state.profile.color || '#0f6b5e')}">${escapeHtml(initials(currentUserName()))}</span><div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · ${state.settings.adminDriveOwner ? 'Drive โดย Admin: ' + escapeHtml(state.settings.adminDriveOwner) : 'ยังไม่มี Admin Drive Hub'}</p></div><button class="btn ghost" data-action="open-account">แก้บัญชี</button></div>
+        <p class="muted">Firebase ใช้เป็นฐานข้อมูล realtime สำหรับ Feed/Comment/Reaction ส่วน Google Drive ใช้เป็นคลังรูปและวิดีโอต้นฉบับเต็มความละเอียด</p>
         <form class="stack" data-form="settings">
+          <div class="firebase-panel">
+            <h3>⚡ Firebase Live Feed</h3>
+            <p class="muted">ใช้ Firestore เป็นฐานข้อมูลเร็วแบบ realtime สำหรับ Feed, Comment, Reaction, Vote และ Game ส่วน Google Drive ใช้เก็บรูป/วิดีโอต้นฉบับเต็มความละเอียด</p>
+            <label class="checkline"><input type="checkbox" name="firebaseEnabled" ${state.settings.firebaseEnabled ? 'checked' : ''}> ใช้ Firebase เป็น Social Feed หลัก</label>
+            <div class="grid two">
+              <div class="field"><label>Trip ID</label><input class="input" name="firebaseTripId" value="${escapeAttr(state.settings.firebaseTripId || 'kannajaburi-trip')}" placeholder="kannajaburi-trip" /></div>
+              <div class="field"><label>Project ID</label><input class="input" name="firebaseProjectId" value="${escapeAttr(state.settings.firebaseProjectId || '')}" placeholder="your-project-id" /></div>
+              <div class="field"><label>API Key</label><input class="input" name="firebaseApiKey" value="${escapeAttr(state.settings.firebaseApiKey || '')}" placeholder="AIza..." /></div>
+              <div class="field"><label>Auth Domain</label><input class="input" name="firebaseAuthDomain" value="${escapeAttr(state.settings.firebaseAuthDomain || '')}" placeholder="project.firebaseapp.com" /></div>
+              <div class="field"><label>App ID</label><input class="input" name="firebaseAppId" value="${escapeAttr(state.settings.firebaseAppId || '')}" placeholder="1:xxx:web:xxx" /></div>
+              <div class="field"><label>Storage Bucket (ไม่บังคับ)</label><input class="input" name="firebaseStorageBucket" value="${escapeAttr(state.settings.firebaseStorageBucket || '')}" placeholder="project.appspot.com" /></div>
+              <div class="field"><label>Messaging Sender ID (ไม่บังคับ)</label><input class="input" name="firebaseMessagingSenderId" value="${escapeAttr(state.settings.firebaseMessagingSenderId || '')}" placeholder="123456789" /></div>
+            </div>
+          </div>
           <div class="field"><label>Google OAuth Client ID</label><input class="input" name="driveClientId" value="${escapeAttr(state.settings.driveClientId)}" placeholder="xxxxx.apps.googleusercontent.com" /></div>
           <div class="field"><label>Trip Drive Folder ID หรือ URL โฟลเดอร์</label><input class="input" name="driveRootFolderId" value="${escapeAttr(state.settings.driveRootFolderId)}" placeholder="https://drive.google.com/drive/folders/..." /></div>
           <div class="field"><label>ชื่อโฟลเดอร์ถ้าจะให้แอพสร้างใหม่</label><input class="input" name="driveRootFolderName" value="${escapeAttr(state.settings.driveRootFolderName)}" /></div>
           <label class="checkline"><input type="checkbox" name="autoSyncOnStart" ${state.settings.autoSyncOnStart ? 'checked' : ''}> Auto sync ตอนเปิดแอพ</label>
-          <label class="checkline"><input type="checkbox" name="liveSyncEnabled" ${state.settings.liveSyncEnabled ? 'checked' : ''}> Live sync ทุก ${Number(state.settings.syncIntervalSec || 45)} วินาทีเมื่อเปิดแอพอยู่</label>
+          <label class="checkline"><input type="checkbox" name="liveSyncEnabled" ${state.settings.liveSyncEnabled ? 'checked' : ''}> Social live sync เมื่อเปิดแอพอยู่</label>
+          <label class="checkline"><input type="checkbox" name="driveManagedByAdmin" ${state.settings.driveManagedByAdmin !== false ? 'checked' : ''}> รับค่า Drive Hub จาก Admin อัตโนมัติผ่าน Firebase</label>
+          <div class="field"><label>ความถี่ Auto Sync (วินาที)</label><input class="input" name="syncIntervalSec" type="number" min="15" max="120" value="${Number(state.settings.syncIntervalSec || 20)}" /></div>
+          <label class="checkline"><input type="checkbox" name="useIncrementalSync" ${state.settings.useIncrementalSync !== false ? 'checked' : ''}> ใช้ Incremental sync เพื่อลดการโหลดซ้ำ</label>
           <button class="btn primary" type="submit">บันทึกการตั้งค่า</button>
         </form>
         <div class="grid two">
+          <button class="btn accent" data-action="connect-firebase">เชื่อมต่อ Firebase</button>
+          <button class="btn" data-action="push-firebase">ส่ง Pending เข้า Firebase</button>
           <button class="btn accent" data-action="connect-drive">เชื่อมต่อ Drive</button>
+          <button class="btn primary" data-action="publish-admin-drive">👑 Admin: แชร์ Drive Hub ให้ทุกคน</button>
           <button class="btn" data-action="create-drive-folder">สร้างโฟลเดอร์ทริป</button>
           <button class="btn" data-action="sync-drive">Sync Drive Hub</button>
+          <button class="btn" data-action="full-sync">Full Rebuild Sync</button>
           <button class="btn" data-action="upload-pending">ส่ง Pending เข้า Hub</button>
         </div>
-        <div class="code">สถานะ: ${drive.connected ? 'Connected' : 'Not connected'}<br>Folder: ${escapeHtml(state.settings.driveRootFolderId || '-')}<br>${escapeHtml(syncSummary())}</div>
+        <div class="social-note"><b>โหมดแนะนำ:</b> Firebase-first + Drive Media ใช้งานคล้ายโซเชียลมากที่สุด: Firestore realtime สำหรับ Feed, Google Drive สำหรับรูปเต็มความละเอียด</div>
+        <div class="code">Firebase: ${firebase.connected ? 'Connected' : 'Not connected'}<br>Drive: ${drive.connected ? 'Connected' : 'Not connected'}<br>Folder: ${escapeHtml(state.settings.driveRootFolderId || '-')}<br>${escapeHtml(syncSummary())}</div>
       </div>
 
       <div class="card pad stack">
@@ -625,12 +944,12 @@ function renderTools() {
           <button class="btn primary" type="submit">เพิ่มรายการ</button>
         </form>
         <div class="spread"><b>รวมทั้งหมด</b><b>${money(total)}</b></div>
-        ${state.expenses.slice(-6).reverse().map(e => `<div class="quest-card"><b>${escapeHtml(e.title)} · ${money(e.amount)}</b><p class="quest-desc">จ่ายโดย ${escapeHtml(e.payer || '-')} · คนละประมาณ ${money(state.members.length ? e.amount / state.members.length : e.amount)}</p></div>`).join('') || '<div class="empty">ยังไม่มีค่าใช้จ่าย</div>'}
+        ${expenseList.slice(0, 20).map(e => `<div class="quest-card"><div class="spread"><b>${escapeHtml(e.title)} · ${money(e.amount)}</b>${canManageItem(e) ? `<button class="btn danger compact-btn" data-action="delete-expense" data-id="${escapeAttr(e.id)}">ลบ</button>` : ''}</div><p class="quest-desc">จ่ายโดย ${escapeHtml(e.payer || '-')} · คนละประมาณ ${money(activeList('members').length ? Number(e.amount || 0) / activeList('members').length : e.amount)}</p><p class="small muted">เพิ่มโดย ${escapeHtml(e.author || e.createdBy || 'แก๊งนี้')} · ${formatThaiDate(e.createdAt)}</p></div>`).join('') || '<div class="empty">ยังไม่มีค่าใช้จ่าย</div>'}
       </div>
 
       <div class="card pad stack">
         <h3>✅ Checklist + Backup</h3>
-        ${['เสื้อผ้า', 'ผ้าเช็ดตัว', 'ยากันยุง', 'Power bank', 'ถุงกันน้ำ', 'รองเท้าแตะ/ลุยน้ำ', 'ยาประจำตัว', 'ไฟฉาย', 'สายชาร์จ', 'ลำโพงพกพา'].map((x, i) => `<label class="quest-card"><span><input type="checkbox" data-action="checklist" data-index="${i}"> ${escapeHtml(x)}</span></label>`).join('')}
+        ${PACKING_ITEMS.map((x, i) => `<label class="quest-card"><span><input type="checkbox" data-action="checklist" data-index="${i}" ${state.checklist?.items?.[i] ? 'checked' : ''}> ${escapeHtml(x)}</span></label>`).join('')}
         <div class="grid two">
           <button class="btn" data-action="export-state">Export Backup</button>
           <label class="btn" for="importStateInput">Import Backup</label>
@@ -682,15 +1001,76 @@ function renderReelMedia(media) {
 
 function buildReelItems() {
   const cover = [{ kicker: 'Memory Reel', title: state.trip.title, text: state.trip.subtitle, media: [] }];
-  const moments = [...state.moments].sort((a,b) => new Date(a.createdAt) - new Date(b.createdAt)).map(m => ({
-    kicker: `${m.author || 'แก๊งนี้'} · ${m.place || 'กาญจนบุรี'}`,
+  const activeMoments = activeList('moments');
+  const sourceMoments = activeMoments.some(m => m.featured)
+    ? activeMoments.filter(m => m.featured)
+    : activeMoments;
+  const moments = [...sourceMoments].sort((a,b) => new Date(a.createdAt) - new Date(b.createdAt)).map(m => ({
+    kicker: `${m.author || 'แก๊งนี้'} · ${m.place || 'กาญจนบุรี'}${m.featured ? ' · Vlog Pick' : ''}`,
     title: m.caption || 'โมเมนต์ที่อยากจำ',
     text: `${m.mood || 'ตำนาน'} · ${formatThaiDate(m.createdAt)}`,
     media: m.media || []
   }));
-  const votes = state.votes.slice(-5).map(v => ({ kicker: 'Vote Award', title: v.title, text: `${v.winner} — ${v.reason || 'ตำนานประจำทริป'}`, media: [] }));
-  const end = [{ kicker: 'Trip Recap', title: `XP รวม ${scoreFromState(state)}`, text: `โมเมนต์ ${state.moments.length} · เควสต์ ${Object.keys(state.questsDone).length}/${QUESTS.length} · สมาชิก ${state.members.length}`, media: [] }];
+  const votes = activeList('votes').slice(-5).map(v => ({ kicker: 'Vote Award', title: v.title, text: `${v.winner} — ${v.reason || 'ตำนานประจำทริป'}`, media: [] }));
+  const end = [{ kicker: 'Trip Recap', title: `XP รวม ${scoreFromState(state)}`, text: `โมเมนต์ ${activeMoments.length} · เควสต์ ${Object.keys(state.questsDone).length}/${QUESTS.length} · สมาชิก ${activeList('members').length}`, media: [] }];
   return [...cover, ...moments, ...votes, ...end];
+}
+
+
+function openComposer(dataset = {}) {
+  currentPage = 'feed';
+  composer = {
+    open: true,
+    source: dataset.source || 'feed',
+    caption: dataset.caption || '',
+    place: dataset.place || '',
+    mood: dataset.mood || 'ตำนาน',
+    type: dataset.type || 'moment',
+    gameCard: dataset.gameCard || '',
+    questId: dataset.questId || dataset.id || '',
+    questTitle: dataset.questTitle || ''
+  };
+  render();
+}
+
+function openGameComposer() {
+  const text = sessionStorage.getItem('currentGameCard');
+  if (!text) return toast('เปิดการ์ดเกมก่อน แล้วค่อยโพสต์โมเมนต์');
+  composer = {
+    open: true,
+    source: 'game',
+    caption: text,
+    place: 'เกมบนแพ',
+    mood: 'เกมบนแพ',
+    type: 'game',
+    gameCard: text
+  };
+  currentPage = 'feed';
+  render();
+}
+
+
+function openQuestComposer(id) {
+  const quest = QUESTS.find(q => q.id === id);
+  if (!quest) return toast('ไม่พบภารกิจนี้');
+  composer = {
+    open: true,
+    source: 'quest',
+    caption: `หลักฐานภารกิจ: ${quest.title}`,
+    place: quest.day === 'Day 1' ? 'เขื่อนเขาแหลม / บนแพ' : quest.day === 'Day 2' ? 'สังขละบุรี' : 'กาญนะจ๊ะบุรีทริป',
+    mood: 'ตำนาน',
+    type: 'quest',
+    gameCard: '',
+    questId: quest.id,
+    questTitle: quest.title
+  };
+  currentPage = 'feed';
+  render();
+}
+
+function closeComposer() {
+  composer.open = false;
+  render();
 }
 
 async function onClick(event) {
@@ -705,23 +1085,40 @@ async function onClick(event) {
   const action = btn.dataset.action;
 
   try {
-    if (action === 'quick-moment') { currentPage = 'feed'; render(); return; }
+    if (action === 'quick-moment' || action === 'open-composer') return openComposer(btn.dataset);
+    if (action === 'open-account') { state.accountModalOpen = true; render(); return; }
+    if (action === 'close-account') { state.accountModalOpen = false; render(); return; }
+    if (action === 'close-composer') return closeComposer();
     if (action === 'start-game') { currentPage = 'games'; render(); return; }
     if (action === 'toggle-quest') return toggleQuest(btn.dataset.id);
     if (action === 'random-quest') return randomQuest();
     if (action === 'draw-card') return drawCard();
+    if (action === 'open-game-composer') return openGameComposer();
+    if (action === 'open-quest-composer') return openQuestComposer(btn.dataset.id);
     if (action === 'save-game-moment') return saveCurrentGameAsMoment();
     if (action === 'make-bingo') return makeBingo();
     if (action === 'mark-bingo') return markBingo(Number(btn.dataset.index));
     if (action === 'make-secret-buddy') return makeSecretBuddy();
     if (action === 'complete-secret-buddy') return completeSecretBuddy();
     if (action === 'react') return reactToMoment(btn.dataset.id, btn.dataset.emoji);
+    if (action === 'delete-comment') return deleteComment(btn.dataset.id);
+    if (action === 'delete-moment') return deleteMoment(btn.dataset.id);
+    if (action === 'delete-expense') return deleteExpense(btn.dataset.id);
+    if (action === 'delete-vote') return deleteVote(btn.dataset.id);
+    if (action === 'delete-quote') return deleteQuote(btn.dataset.id);
+    if (action === 'delete-member') return deleteMember(btn.dataset.id);
+    if (action === 'checklist') return toggleChecklist(Number(btn.dataset.index));
+    if (action === 'toggle-feature') return toggleFeaturedMoment(btn.dataset.id);
     if (action === 'download-media') return downloadMomentMedia(btn.dataset.momentId, Number(btn.dataset.mediaIndex || 0));
     if (action === 'download-album') return downloadMomentAlbum(btn.dataset.id);
+    if (action === 'connect-firebase') return connectFirebase();
+    if (action === 'push-firebase') return uploadPendingSocialRecords();
     if (action === 'connect-drive') return connectDrive();
     if (action === 'create-drive-folder') return createDriveFolder();
     if (action === 'sync-drive') return syncDrive();
+    if (action === 'full-sync') return fullSyncDrive();
     if (action === 'upload-pending') return uploadPendingMoments();
+    if (action === 'publish-admin-drive') return publishAdminDriveSettings();
     if (action === 'open-reel') return openReel();
     if (action === 'close-reel') return closeReel();
     if (action === 'next-reel') return moveReel(1);
@@ -743,12 +1140,14 @@ async function onSubmit(event) {
   event.preventDefault();
   const type = form.dataset.form;
   try {
+    if (type === 'profile') return saveProfile(new FormData(form));
     if (type === 'member') return addMember(new FormData(form), form);
     if (type === 'moment') return addMoment(new FormData(form), form);
     if (type === 'settings') return saveSettings(new FormData(form));
     if (type === 'expense') return addExpense(new FormData(form), form);
     if (type === 'quote') return addQuote(new FormData(form), form);
     if (type === 'vote') return addVote(new FormData(form), form);
+    if (type === 'comment') return addComment(new FormData(form), form);
   } catch (error) {
     console.error(error);
     toast(error.message || 'บันทึกไม่สำเร็จ');
@@ -770,11 +1169,45 @@ async function onChange(event) {
   }
 }
 
+
+async function saveProfile(data) {
+  const now = new Date().toISOString();
+  state.profile.accountId ||= uid('acct');
+  state.profile.name = String(data.get('name') || '').trim();
+  state.profile.role = String(data.get('role') || 'สายคอนเทนต์');
+  state.profile.color = String(data.get('color') || '#0f6b5e');
+  state.profile.isAdmin = String(data.get('isAdmin')) === 'true';
+  state.profile.createdAt ||= now;
+  const account = ensureProfileAccount();
+  state.members ||= [];
+  const member = {
+    id: account.id,
+    accountId: account.id,
+    name: account.name,
+    role: account.role,
+    color: account.color,
+    isAdmin: account.isAdmin,
+    createdAt: account.createdAt,
+    updatedAt: now,
+    storage: 'local'
+  };
+  const memberIndex = state.members.findIndex(m => m.accountId === account.id || m.id === account.id || m.name === member.name);
+  if (memberIndex >= 0) state.members[memberIndex] = { ...state.members[memberIndex], ...member };
+  else state.members.push(member);
+  persist();
+  await Promise.all([uploadRecordIfConnected('accounts', account), uploadRecordIfConnected('members', member)]);
+  state.accountModalOpen = false;
+  toast('บันทึกบัญชีแล้ว');
+  render();
+}
+
 async function addMember(data, form) {
   const name = String(data.get('name') || '').trim();
   if (!name) return;
+  const memberId = uid('member');
   const member = {
-    id: uid('member'),
+    id: memberId,
+    accountId: memberId,
     name,
     role: data.get('role') || 'สายคอนเทนต์',
     color: data.get('color') || '#0f6b5e',
@@ -783,7 +1216,7 @@ async function addMember(data, form) {
     storage: 'local'
   };
   state.members.push(member);
-  if (!state.profile.name) state.profile.name = name;
+  if (!state.profile.name) { state.profile.name = name; state.profile.accountId = member.accountId; state.profile.role = member.role; state.profile.color = member.color; }
   persist();
   await uploadRecordIfConnected('members', member);
   form.reset();
@@ -798,6 +1231,10 @@ async function addMoment(data, form) {
     id: uid('moment'),
     type: data.get('type') || 'moment',
     author,
+    authorId: currentAccountId(),
+    source: String(data.get('source') || composer.source || 'feed'),
+    sourceQuestId: String(data.get('sourceQuestId') || '').trim(),
+    sourceQuestTitle: String(data.get('sourceQuestTitle') || '').trim(),
     caption: String(data.get('caption') || '').trim(),
     place: String(data.get('place') || '').trim(),
     mood: data.get('mood') || 'ตำนาน',
@@ -827,26 +1264,23 @@ async function addMoment(data, form) {
     });
   }
 
-  if (drive.connected && state.settings.driveRootFolderId && moment.media.length) {
-    moment = await uploadMomentWithStoredMedia(moment);
-  } else if (drive.connected && state.settings.driveRootFolderId) {
-    await uploadMomentRecordIfConnected(moment);
-  }
-
   state.moments.push(moment);
+  await uploadMomentRecordIfConnected(moment);
   if (moment.type === 'quote') {
-    const quote = { id: uid('quote'), text: moment.caption, author, createdAt: moment.createdAt, updatedAt: moment.updatedAt, storage: moment.storage };
+    const quote = { id: uid('quote'), text: moment.caption, author, accountId: currentAccountId(), createdBy: author, createdById: currentAccountId(), sourceMomentId: moment.id, createdAt: moment.createdAt, updatedAt: moment.updatedAt, storage: moment.storage };
     state.quotes.push(quote);
     await uploadRecordIfConnected('quotes', quote);
   }
   persist();
   form.reset();
+  closeComposer();
   const fileText = files.length ? ` พร้อมไฟล์เต็มความละเอียด ${files.length} ไฟล์` : '';
-  toast(drive.connected ? `บันทึกและส่งขึ้น Drive Hub แล้ว${fileText}` : `บันทึกในเครื่องแล้ว${fileText} รอส่งเข้า Drive Hub`);
+  const hubText = moment.storage === 'firebase' ? 'Firebase Feed' : moment.storage === 'drive' ? 'Drive Hub' : 'เครื่องนี้';
+  toast(`แชร์ลง ${hubText} แล้ว${fileText}`);
   render();
 }
 
-async function uploadMomentWithStoredMedia(moment) {
+async function uploadMomentWithStoredMedia(moment, options = {}) {
   const children = await drive.ensureStructure();
   const remoteMoment = structuredClone(moment);
   remoteMoment.storage = 'drive';
@@ -895,7 +1329,7 @@ async function uploadMomentWithStoredMedia(moment) {
     ...remoteMoment,
     media: (remoteMoment.media || []).map(stripTransientMedia)
   };
-  await drive.uploadRecord('moments', uploadPayload);
+  if (!options.skipDriveRecord) await drive.uploadRecord('moments', uploadPayload);
 
   const localMoment = structuredClone(remoteMoment);
   localMoment.media = (localMoment.media || []).map((media, index) => localBlobIds[index] ? { ...media, localBlobId: localBlobIds[index] } : media);
@@ -908,28 +1342,49 @@ function stripTransientMedia(media = {}) {
 }
 
 function saveSettings(data) {
+  const oldFolder = state.settings.driveRootFolderId;
   state.settings.driveClientId = String(data.get('driveClientId') || '').trim();
   state.settings.driveRootFolderId = extractDriveFolderId(String(data.get('driveRootFolderId') || '').trim());
   state.settings.driveRootFolderName = String(data.get('driveRootFolderName') || 'กาญนะจ๊ะบุรีทริป - Shared Memories').trim();
+  state.settings.firebaseEnabled = data.get('firebaseEnabled') === 'on';
+  state.settings.firebaseTripId = safeTripId(String(data.get('firebaseTripId') || 'kannajaburi-trip'));
+  state.settings.firebaseApiKey = String(data.get('firebaseApiKey') || '').trim();
+  state.settings.firebaseAuthDomain = String(data.get('firebaseAuthDomain') || '').trim();
+  state.settings.firebaseProjectId = String(data.get('firebaseProjectId') || '').trim();
+  state.settings.firebaseStorageBucket = String(data.get('firebaseStorageBucket') || '').trim();
+  state.settings.firebaseMessagingSenderId = String(data.get('firebaseMessagingSenderId') || '').trim();
+  state.settings.firebaseAppId = String(data.get('firebaseAppId') || '').trim();
   state.settings.autoSyncOnStart = data.get('autoSyncOnStart') === 'on';
   state.settings.liveSyncEnabled = data.get('liveSyncEnabled') === 'on';
-  state.settings.syncMode = 'drive-first';
-  state.settings.driveChildren = {};
+  state.settings.useIncrementalSync = data.get('useIncrementalSync') === 'on';
+  state.settings.driveManagedByAdmin = data.get('driveManagedByAdmin') === 'on';
+  state.settings.syncIntervalSec = Math.min(120, Math.max(15, Number(data.get('syncIntervalSec') || 20)));
+  state.settings.syncMode = state.settings.firebaseEnabled ? 'firebase-first' : 'drive-first';
+  if (oldFolder !== state.settings.driveRootFolderId) {
+    state.settings.driveChildren = {};
+    state.settings.collectionSyncAt = {};
+  }
   persist();
-  if (state.settings.liveSyncEnabled && drive.connected) startSyncLoop();
+  if (state.settings.liveSyncEnabled && drive.connected && !state.settings.firebaseEnabled) startSyncLoop();
   else stopSyncLoop();
   toast('บันทึกการตั้งค่าแล้ว');
   render();
 }
 
 async function addExpense(data, form) {
+  const now = new Date().toISOString();
+  const actor = currentActorMeta();
   const expense = {
     id: uid('expense'),
     title: String(data.get('title') || '').trim(),
     amount: Number(data.get('amount') || 0),
     payer: String(data.get('payer') || '').trim(),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    author: actor.author,
+    accountId: actor.accountId,
+    createdBy: actor.author,
+    createdById: actor.accountId,
+    createdAt: now,
+    updatedAt: now,
     storage: 'local'
   };
   state.expenses.push(expense);
@@ -944,9 +1399,11 @@ async function addQuote(data, form) {
   const text = String(data.get('text') || '').trim();
   if (!text) return;
   const now = new Date().toISOString();
-  const author = state.profile.name || state.members[0]?.name || 'แก๊งนี้';
-  const quote = { id: uid('quote'), text, author, createdAt: now, updatedAt: now, storage: 'local' };
-  const moment = { id: uid('moment'), type: 'quote', author, caption: text, place: 'Quote ประจำทริป', mood: 'ตำนาน', createdAt: now, updatedAt: now, media: [], storage: 'local' };
+  const actor = currentActorMeta();
+  const author = actor.author;
+  const quote = { id: uid('quote'), text, author, accountId: actor.accountId, createdBy: actor.author, createdById: actor.accountId, createdAt: now, updatedAt: now, storage: 'local' };
+  const moment = { id: uid('moment'), type: 'quote', author, authorId: actor.accountId, sourceQuoteId: quote.id, caption: text, place: 'Quote ประจำทริป', mood: 'ตำนาน', createdAt: now, updatedAt: now, media: [], storage: 'local' };
+  quote.sourceMomentId = moment.id;
   state.quotes.push(quote);
   state.moments.push(moment);
   persist();
@@ -958,16 +1415,35 @@ async function addQuote(data, form) {
 
 async function addVote(data, form) {
   const now = new Date().toISOString();
+  const actor = currentActorMeta();
   const vote = {
     id: uid('vote'),
     title: String(data.get('title') || '').trim(),
     winner: String(data.get('winner') || '').trim(),
     reason: String(data.get('reason') || '').trim(),
+    author: actor.author,
+    accountId: actor.accountId,
+    createdBy: actor.author,
+    createdById: actor.accountId,
     createdAt: now,
     updatedAt: now,
     storage: 'local'
   };
-  const moment = { id: uid('moment'), type: 'vote', author: 'Vote Battle', caption: `${vote.title}: ${vote.winner}`, place: vote.reason, mood: 'รางวัลประจำวัน', createdAt: now, updatedAt: now, media: [], storage: 'local' };
+  const moment = {
+    id: uid('moment'),
+    type: 'vote',
+    author: actor.author,
+    authorId: actor.accountId,
+    sourceVoteId: vote.id,
+    caption: `${vote.title}: ${vote.winner}`,
+    place: vote.reason,
+    mood: 'รางวัลประจำวัน',
+    createdAt: now,
+    updatedAt: now,
+    media: [],
+    storage: 'local'
+  };
+  vote.momentId = moment.id;
   state.votes.push(vote);
   state.moments.push(moment);
   persist();
@@ -987,7 +1463,10 @@ async function toggleQuest(id) {
     questId: id,
     done,
     completedAt: done ? now : '',
-    author: state.profile.name || 'แก๊งนี้',
+    author: currentUserName(),
+    accountId: currentAccountId(),
+    createdBy: currentUserName(),
+    createdById: currentAccountId(),
     createdAt: now,
     updatedAt: now,
     storage: 'local'
@@ -1022,7 +1501,7 @@ function drawCard() {
 async function saveCurrentGameAsMoment() {
   const text = sessionStorage.getItem('currentGameCard');
   if (!text) return toast('เปิดการ์ดก่อนค่อยบันทึก');
-  const moment = { id: uid('moment'), type: 'game', author: 'Game Card', caption: text, place: 'เกมบนแพ', mood: 'ฮา', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), media: [], storage: 'local' };
+  const moment = { id: uid('moment'), type: 'game', author: currentUserName(), authorId: currentAccountId(), caption: text, place: 'เกมบนแพ', mood: 'ฮา', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), media: [], storage: 'local' };
   state.moments.push(moment);
   persist();
   await uploadMomentRecordIfConnected(moment);
@@ -1052,9 +1531,10 @@ async function markBingo(index) {
 }
 
 function makeSecretBuddy() {
-  if (!state.members.length) return toast('เพิ่มสมาชิกก่อน');
-  const player = pick(state.members).name;
-  const targets = state.members.filter(m => m.name !== player);
+  const members = activeList('members');
+  if (!members.length) return toast('เพิ่มสมาชิกก่อน');
+  const player = pick(members).name;
+  const targets = members.filter(m => m.name !== player);
   const target = targets.length ? pick(targets).name : 'เพื่อนในแก๊ง';
   const missions = [
     `ทำให้ ${target} หัวเราะโดยห้ามบอกว่าเป็นภารกิจ`,
@@ -1064,30 +1544,252 @@ function makeSecretBuddy() {
     `ทำให้ ${target} ได้รูปโปรไฟล์ใหม่`,
     `ชม ${target} แบบจริงใจจนเขางง`
   ];
-  state.secretBuddy = { id: uid('secret'), player, target, mission: pick(missions), createdAt: new Date().toISOString() };
+  state.secretBuddy = { id: 'shared-secret-buddy', type: 'secretBuddy', player, target, mission: pick(missions), author: currentUserName(), accountId: currentAccountId(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), storage: 'local' };
   persist();
+  uploadRecordIfConnected('games', state.secretBuddy).catch(console.warn);
   toast('สุ่ม Secret Buddy แล้ว');
   render();
 }
 
 async function completeSecretBuddy() {
   if (!state.secretBuddy) return;
-  const moment = { id: uid('moment'), type: 'secret', author: state.secretBuddy.player, caption: `Secret Buddy สำเร็จ: ${state.secretBuddy.mission}`, place: 'ภารกิจลับ', mood: 'อบอุ่น', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), media: [], storage: 'local' };
+  const now = new Date().toISOString();
+  const moment = { id: uid('moment'), type: 'secret', author: currentUserName(), authorId: currentAccountId(), caption: `Secret Buddy สำเร็จ: ${state.secretBuddy.mission}`, place: 'ภารกิจลับ', mood: 'อบอุ่น', createdAt: now, updatedAt: now, media: [], storage: 'local' };
+  const completed = { ...state.secretBuddy, completed: true, completedAt: now, completedBy: currentUserName(), completedById: currentAccountId(), updatedAt: now, storage: 'local' };
   state.moments.push(moment);
   state.secretBuddy = null;
   persist();
-  await uploadMomentRecordIfConnected(moment);
+  await Promise.all([uploadMomentRecordIfConnected(moment), uploadRecordIfConnected('games', completed)]);
   toast('Secret Buddy สำเร็จ +25 XP');
   render();
 }
 
-async function reactToMoment(momentId, emoji) {
-  const reaction = { id: uid('reaction'), momentId, emoji, author: state.profile.name || 'เพื่อน', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), storage: 'local' };
-  state.reactions.push(reaction);
+async function addComment(data, form) {
+  const text = String(data.get('text') || '').trim();
+  const momentId = form.dataset.momentId;
+  if (!text || !momentId) return;
+  if (!ensureMomentActive(momentId)) return toast('โพสต์นี้ถูกลบหรือไม่พร้อมคอมเมนต์แล้ว');
+  const now = new Date().toISOString();
+  const comment = {
+    id: uid('comment'),
+    momentId,
+    text,
+    author: currentUserName(),
+    accountId: currentAccountId(),
+    createdAt: now,
+    updatedAt: now,
+    storage: 'local'
+  };
+  state.comments ||= [];
+  state.comments.push(comment);
   persist();
-  toast(`React: ${emoji}`);
+  await uploadRecordIfConnected('comments', comment);
+  form.reset();
+  toast('คอมเมนต์แล้ว');
+  render();
+}
+
+async function softDeleteRecord(collection, key, id, label = 'รายการ') {
+  const list = ensureCollection(key);
+  const item = list.find(entry => entry.id === id);
+  if (!item || item.deleted) return toast(`ไม่พบ${label}นี้ หรือถูกลบไปแล้ว`);
+  if (!canManageItem(item)) return toast(`ลบ${label}ได้เฉพาะเจ้าของหรือ Admin`);
+  if (!confirm(`ยืนยันลบ${label}นี้?`)) return;
+  const now = new Date().toISOString();
+  item.deleted = true;
+  item.deletedAt = now;
+  item.deletedBy = currentUserName();
+  item.deletedById = currentAccountId();
+  item.updatedAt = now;
+  item.storage = 'local';
+  persist();
+  await uploadRecordIfConnected(collection, item);
+  toast(`ลบ${label}แล้ว`);
+  render();
+  return item;
+}
+
+async function deleteExpense(id) {
+  return softDeleteRecord('expenses', 'expenses', id, 'ค่าใช้จ่าย');
+}
+
+async function deleteComment(id) {
+  return softDeleteRecord('comments', 'comments', id, 'คอมเมนต์');
+}
+
+async function deleteMoment(id) {
+  const moment = await softDeleteRecord('moments', 'moments', id, 'โพสต์');
+  if (!moment) return;
+  // คอมเมนต์และ reaction ยังเก็บไว้เป็นประวัติใน Firebase/Drive แต่จะไม่ถูกแสดงเพราะโพสต์ถูกซ่อนแล้ว
+}
+
+async function deleteVote(id) {
+  const vote = await softDeleteRecord('votes', 'votes', id, 'ผลโหวต');
+  if (!vote) return;
+  const linkedMoment = state.moments.find(m => m.sourceVoteId === vote.id || m.id === vote.momentId);
+  if (linkedMoment && !linkedMoment.deleted && canManageItem(vote)) {
+    const now = new Date().toISOString();
+    linkedMoment.deleted = true;
+    linkedMoment.deletedAt = now;
+    linkedMoment.deletedBy = currentUserName();
+    linkedMoment.deletedById = currentAccountId();
+    linkedMoment.updatedAt = now;
+    linkedMoment.storage = 'local';
+    await uploadMomentRecordIfConnected(linkedMoment);
+    persist();
+  }
+}
+
+async function deleteQuote(id) {
+  const quote = await softDeleteRecord('quotes', 'quotes', id, 'Quote');
+  if (!quote) return;
+  const linkedMoment = state.moments.find(m => m.sourceQuoteId === quote.id || m.id === quote.sourceMomentId);
+  if (linkedMoment && !linkedMoment.deleted && canManageItem(quote)) {
+    const now = new Date().toISOString();
+    linkedMoment.deleted = true;
+    linkedMoment.deletedAt = now;
+    linkedMoment.deletedBy = currentUserName();
+    linkedMoment.deletedById = currentAccountId();
+    linkedMoment.updatedAt = now;
+    linkedMoment.storage = 'local';
+    await uploadMomentRecordIfConnected(linkedMoment);
+    persist();
+  }
+}
+
+async function deleteMember(id) {
+  return softDeleteRecord('members', 'members', id, 'สมาชิก');
+}
+
+async function toggleChecklist(index) {
+  if (Number.isNaN(index) || index < 0 || index >= PACKING_ITEMS.length) return;
+  const now = new Date().toISOString();
+  state.checklist ||= { id: 'shared-checklist', type: 'checklist', items: {}, createdAt: now, storage: 'local' };
+  state.checklist.items ||= {};
+  state.checklist.items[index] = !state.checklist.items[index];
+  state.checklist.updatedAt = now;
+  state.checklist.createdAt ||= now;
+  state.checklist.author = currentUserName();
+  state.checklist.accountId = currentAccountId();
+  state.checklist.storage = 'local';
+  persist();
+  await uploadRecordIfConnected('checklists', state.checklist);
+  toast(state.checklist.items[index] ? `เช็กแล้ว: ${PACKING_ITEMS[index]}` : `ยกเลิกเช็ก: ${PACKING_ITEMS[index]}`);
+  render();
+}
+
+
+async function toggleFeaturedMoment(momentId) {
+  const moment = state.moments.find(item => item.id === momentId);
+  if (!moment) return;
+  moment.featured = !moment.featured;
+  moment.updatedAt = new Date().toISOString();
+  moment.storage = 'local';
+  persist();
+  await uploadMomentRecordIfConnected(moment);
+  toast(moment.featured ? 'เก็บเข้า Vlog Studio แล้ว' : 'นำออกจาก Vlog Studio แล้ว');
+  render();
+}
+
+async function fullSyncDrive() {
+  state.settings.collectionSyncAt = {};
+  persist();
+  return syncDrive({ full: true, uploadPendingFirst: true });
+}
+
+async function reactToMoment(momentId, emoji) {
+  const now = new Date().toISOString();
+  const accountId = currentAccountId();
+  const author = currentUserName();
+  state.reactions ||= [];
+  const existing = state.reactions.find(r => r.momentId === momentId && (r.accountId === accountId || (!r.accountId && r.author === author)));
+
+  if (existing && existing.emoji === emoji) {
+    // กด reaction เดิมซ้ำ = ยกเลิก reaction ของตัวเอง
+    existing.emoji = '';
+    existing.deleted = true;
+    existing.updatedAt = now;
+    existing.storage = 'local';
+    persist();
+    toast('ยกเลิก reaction แล้ว');
+    await uploadRecordIfConnected('reactions', existing);
+    render();
+    return;
+  }
+
+  const reaction = existing || {
+    id: `reaction_${momentId}_${accountId}`.replace(/[^a-zA-Z0-9_-]+/g, '-'),
+    momentId,
+    accountId,
+    author,
+    createdAt: now,
+    storage: 'local'
+  };
+  reaction.emoji = emoji;
+  reaction.deleted = false;
+  reaction.author = author;
+  reaction.accountId = accountId;
+  reaction.updatedAt = now;
+  reaction.storage = 'local';
+  if (!existing) state.reactions.push(reaction);
+  persist();
+  toast(existing ? `เปลี่ยน reaction เป็น ${emoji}` : `React: ${emoji}`);
   await uploadRecordIfConnected('reactions', reaction);
   render();
+}
+
+
+
+async function connectFirebase() {
+  await firebase.connect({ listen: true });
+  state.settings.firebaseEnabled = true;
+  state.settings.syncMode = 'firebase-first';
+  state.settings.lastFirebaseError = '';
+  persist();
+  await uploadPendingSocialRecords({ silent: true });
+  render();
+}
+
+async function uploadPendingSocialRecords(options = {}) {
+  const { silent = false } = options;
+  if (!state.settings.firebaseEnabled) {
+    if (!silent) toast('เปิด Firebase ใน Settings ก่อน');
+    return 0;
+  }
+  if (!firebase.connected) await firebase.connect({ listen: true });
+
+  // ถ้าโมเมนต์มีไฟล์ pending ให้ส่งไฟล์ขึ้น Drive ก่อน เพื่อไม่ให้ Firestore เก็บไฟล์ใหญ่
+  if (drive.connected && state.settings.driveRootFolderId) {
+    for (const moment of state.moments.filter(m => (m.media || []).some(media => media.pendingUpload || media.localBlobId))) {
+      try {
+        const result = await uploadMomentWithStoredMedia(moment, { skipDriveRecord: true });
+        Object.assign(moment, result, { storage: 'local' });
+      } catch (error) {
+        console.warn('Cannot upload media before Firebase sync:', error);
+      }
+    }
+  }
+
+  const data = {
+    accounts: (state.accounts || []).filter(a => a.storage !== 'firebase'),
+    tripSettings: (state.tripSettings || []).filter(t => t.storage !== 'firebase'),
+    members: state.members.filter(m => m.storage !== 'firebase'),
+    moments: state.moments.filter(m => m.storage !== 'firebase' && !(m.media || []).some(media => media.pendingUpload)),
+    reactions: state.reactions.filter(r => r.storage !== 'firebase'),
+    comments: (state.comments || []).filter(c => c.storage !== 'firebase'),
+    votes: state.votes.filter(v => v.storage !== 'firebase'),
+    quotes: state.quotes.filter(q => q.storage !== 'firebase'),
+    expenses: state.expenses.filter(e => e.storage !== 'firebase'),
+    quests: (state.questEvents || []).filter(q => q.storage !== 'firebase'),
+    games: [state.bingo, state.secretBuddy].filter(item => item && item.storage !== 'firebase'),
+    checklists: state.checklist?.updatedAt && state.checklist.storage !== 'firebase' ? [state.checklist] : []
+  };
+  const count = await firebase.uploadBatch(data);
+  for (const records of Object.values(data)) for (const item of records) item.storage = 'firebase';
+  persist();
+  if (!silent) toast(count ? `ส่ง Pending เข้า Firebase ${count} รายการแล้ว` : 'ไม่มี Pending สำหรับ Firebase');
+  render();
+  return count;
 }
 
 async function connectDrive() {
@@ -1096,6 +1798,7 @@ async function connectDrive() {
   persist();
   startSyncLoop();
   await syncDrive({ silent: true, uploadPendingFirst: true });
+  if (state.profile.isAdmin && state.settings.firebaseEnabled && firebase.connected) await publishAdminDriveSettings();
   render();
 }
 
@@ -1105,11 +1808,12 @@ async function createDriveFolder() {
   toast(`สร้างโฟลเดอร์แล้ว: ${folder.name}`);
   startSyncLoop();
   await uploadPendingMoments({ silent: true });
+  if (state.profile.isAdmin && state.settings.firebaseEnabled && firebase.connected) await publishAdminDriveSettings();
   render();
 }
 
 async function syncDrive(options = {}) {
-  const { silent = false, uploadPendingFirst = false } = options;
+  const { silent = false, uploadPendingFirst = false, full = false } = options;
   if (isSyncing) return;
   if (!state.settings.driveClientId) {
     if (!silent) toast('กรุณาใส่ Google OAuth Client ID ก่อน');
@@ -1125,7 +1829,7 @@ async function syncDrive(options = {}) {
     renderSyncStatusOnly();
     if (!drive.connected) await drive.authorize({ prompt: '' });
     if (uploadPendingFirst) await uploadPendingMoments({ silent: true });
-    const shared = await drive.listSharedData();
+    const shared = await drive.listSharedData({ full });
     applyDriveData(shared);
     state.settings.lastDriveError = '';
     persist();
@@ -1163,6 +1867,9 @@ async function uploadPendingMoments(options = {}) {
   for (const reaction of state.reactions.filter(r => r.storage !== 'drive')) {
     await uploadRecordIfConnected('reactions', reaction, { force: true }); uploaded += 1;
   }
+  for (const comment of (state.comments || []).filter(c => c.storage !== 'drive')) {
+    await uploadRecordIfConnected('comments', comment, { force: true }); uploaded += 1;
+  }
   for (const vote of state.votes.filter(v => v.storage !== 'drive')) {
     await uploadRecordIfConnected('votes', vote, { force: true }); uploaded += 1;
   }
@@ -1178,6 +1885,12 @@ async function uploadPendingMoments(options = {}) {
   if (state.bingo && state.bingo.storage !== 'drive') {
     await uploadRecordIfConnected('games', state.bingo, { force: true }); uploaded += 1;
   }
+  if (state.secretBuddy && state.secretBuddy.storage !== 'drive') {
+    await uploadRecordIfConnected('games', state.secretBuddy, { force: true }); uploaded += 1;
+  }
+  if (state.checklist?.updatedAt && state.checklist.storage !== 'drive') {
+    await uploadRecordIfConnected('checklists', state.checklist, { force: true }); uploaded += 1;
+  }
 
   persist();
   if (!silent) toast(uploaded ? `ส่ง Pending เข้า Drive Hub ${uploaded} รายการแล้ว` : 'ไม่มี Pending ที่ต้องอัปโหลด');
@@ -1187,10 +1900,28 @@ async function uploadPendingMoments(options = {}) {
 
 async function uploadRecordIfConnected(collection, item, options = {}) {
   const force = Boolean(options.force);
+  const now = new Date().toISOString();
+  item.updatedAt ||= now;
+
+  if (state.settings.firebaseEnabled && (firebase.connected || force)) {
+    try {
+      if (!firebase.connected) await firebase.connect({ listen: true });
+      await firebase.uploadRecord(collection, item);
+      item.storage = 'firebase';
+      item.syncedAt = now;
+      persist();
+      return true;
+    } catch (error) {
+      console.warn('Firebase upload pending kept local', collection, item, error);
+      state.settings.lastFirebaseError = error.message || String(error);
+      item.storage = item.storage || 'local';
+      persist();
+      if (!drive.connected && !state.settings.driveRootFolderId) return false;
+    }
+  }
+
   if ((!drive.connected || !state.settings.driveRootFolderId) && !force) return false;
   try {
-    const now = new Date().toISOString();
-    item.updatedAt ||= now;
     const file = await drive.uploadRecord(collection, item);
     item.storage = 'drive';
     item.syncedAt = now;
@@ -1205,43 +1936,85 @@ async function uploadRecordIfConnected(collection, item, options = {}) {
 }
 
 async function uploadMomentRecordIfConnected(moment) {
-  if (!drive.connected || !state.settings.driveRootFolderId) return false;
   try {
-    const result = (moment.media || []).length ? await uploadMomentWithStoredMedia(moment) : (await drive.uploadMoment(moment)).moment;
-    Object.assign(moment, result, { storage: 'drive' });
-    persist();
-    return true;
+    if ((moment.media || []).length && drive.connected && state.settings.driveRootFolderId) {
+      const result = await uploadMomentWithStoredMedia(moment, { skipDriveRecord: state.settings.firebaseEnabled && firebase.connected });
+      Object.assign(moment, result);
+    }
+
+    const hasPendingMedia = (moment.media || []).some(media => media.pendingUpload || (!media.driveFileId && !media.webViewLink && media.localBlobId));
+    if (state.settings.firebaseEnabled && firebase.connected && !hasPendingMedia) {
+      await firebase.uploadRecord('moments', moment);
+      moment.storage = 'firebase';
+      persist();
+      return true;
+    }
+
+    if (drive.connected && state.settings.driveRootFolderId) {
+      const result = (moment.media || []).length ? await uploadMomentWithStoredMedia(moment) : (await drive.uploadMoment(moment)).moment;
+      Object.assign(moment, result, { storage: 'drive' });
+      persist();
+      return true;
+    }
   } catch (error) {
     console.warn('Moment upload pending kept local', moment, error);
-    moment.storage = 'local';
-    return false;
   }
+  moment.storage = 'local';
+  return false;
+}
+
+
+function applyFirebaseData(shared = {}) {
+  mergeRemote('accounts', shared.accounts || [], 'firebase');
+  mergeRemote('tripSettings', shared.tripSettings || [], 'firebase');
+  const adminDrive = (state.tripSettings || []).find(x => x.id === 'admin-drive-hub');
+  if (state.settings.driveManagedByAdmin !== false && adminDrive) {
+    const driveChanged = applyAdminDriveSettings(adminDrive);
+    if (driveChanged && state.settings.autoSyncOnStart) setTimeout(() => autoConnectDriveOnStart(), 250);
+  }
+  mergeRemote('members', shared.members || [], 'firebase');
+  mergeRemote('moments', shared.moments || [], 'firebase');
+  mergeRemote('reactions', shared.reactions || [], 'firebase');
+  mergeRemote('comments', shared.comments || [], 'firebase');
+  mergeRemote('votes', shared.votes || [], 'firebase');
+  mergeRemote('quotes', shared.quotes || [], 'firebase');
+  mergeRemote('expenses', shared.expenses || [], 'firebase');
+  mergeQuestEvents(shared.quests || [], 'firebase');
+  mergeGameRecords(shared.games || [], 'firebase');
+  mergeChecklistRecords(shared.checklists || [], 'firebase');
+  state.settings.lastFirebaseError = '';
+  persist();
+  if (!document.hidden) render();
 }
 
 function applyDriveData(shared = {}) {
-  mergeRemote('members', shared.members || []);
-  mergeRemote('moments', shared.moments || []);
-  mergeRemote('reactions', shared.reactions || []);
-  mergeRemote('votes', shared.votes || []);
-  mergeRemote('quotes', shared.quotes || []);
-  mergeRemote('expenses', shared.expenses || []);
-  mergeQuestEvents(shared.quests || []);
-  mergeGameRecords(shared.games || []);
+  mergeRemote('accounts', shared.accounts || [], 'drive');
+  mergeRemote('tripSettings', shared.tripSettings || [], 'drive');
+  mergeRemote('members', shared.members || [], 'drive');
+  mergeRemote('moments', shared.moments || [], 'drive');
+  mergeRemote('reactions', shared.reactions || [], 'drive');
+  mergeRemote('comments', shared.comments || [], 'drive');
+  mergeRemote('votes', shared.votes || [], 'drive');
+  mergeRemote('quotes', shared.quotes || [], 'drive');
+  mergeRemote('expenses', shared.expenses || [], 'drive');
+  mergeQuestEvents(shared.quests || [], 'drive');
+  mergeGameRecords(shared.games || [], 'drive');
+  mergeChecklistRecords(shared.checklists || [], 'drive');
 }
 
-function mergeRemote(key, remoteItems) {
+function mergeRemote(key, remoteItems, source = 'drive') {
   const map = new Map((state[key] || []).map(item => [item.id, item]));
   for (const remote of remoteItems || []) {
     if (!remote?.id) continue;
     const local = map.get(remote.id);
     if (!local) {
-      map.set(remote.id, { ...remote, storage: 'drive' });
+      map.set(remote.id, { ...remote, storage: remote.storage || source });
       continue;
     }
     const localTime = new Date(local.updatedAt || local.createdAt || 0).getTime();
     const remoteTime = new Date(remote.updatedAt || remote._driveModifiedTime || remote.createdAt || 0).getTime();
     if (remoteTime >= localTime || local.storage === 'drive') {
-      const merged = { ...local, ...remote, storage: 'drive' };
+      const merged = { ...local, ...remote, storage: remote.storage || source };
       if (Array.isArray(merged.media) && Array.isArray(local.media)) {
         merged.media = merged.media.map((remoteMedia, index) => {
           const localMedia = findMatchingLocalMedia(remoteMedia, local.media, index);
@@ -1268,9 +2041,9 @@ function findMatchingLocalMedia(remoteMedia, localMediaList, index) {
   ) || localMediaList[index] || null;
 }
 
-function mergeQuestEvents(remoteItems = []) {
+function mergeQuestEvents(remoteItems = [], source = 'drive') {
   state.questEvents ||= [];
-  mergeRemote('questEvents', remoteItems);
+  mergeRemote('questEvents', remoteItems, source);
   const latestByQuest = new Map();
   for (const event of state.questEvents || []) {
     if (!event.questId) continue;
@@ -1285,15 +2058,40 @@ function mergeQuestEvents(remoteItems = []) {
   }
 }
 
-function mergeGameRecords(records = []) {
+function mergeGameRecords(records = [], source = 'drive') {
   const bingos = records.filter(r => r.type === 'bingo' && r.cells?.length);
-  if (!bingos.length) return;
-  bingos.sort((a, b) => new Date(a.updatedAt || a.createdAt || 0) - new Date(b.updatedAt || b.createdAt || 0));
-  const latest = bingos.at(-1);
-  const localTime = new Date(state.bingo?.updatedAt || state.bingo?.createdAt || 0).getTime();
+  if (bingos.length) {
+    bingos.sort((a, b) => new Date(a.updatedAt || a.createdAt || 0) - new Date(b.updatedAt || b.createdAt || 0));
+    const latest = bingos.at(-1);
+    const localTime = new Date(state.bingo?.updatedAt || state.bingo?.createdAt || 0).getTime();
+    const remoteTime = new Date(latest.updatedAt || latest.createdAt || 0).getTime();
+    if (!state.bingo || remoteTime >= localTime || state.bingo.storage === 'drive') {
+      state.bingo = { ...latest, storage: latest.storage || source };
+    }
+  }
+  const secretRecords = records.filter(r => r.type === 'secretBuddy');
+  if (secretRecords.length) {
+    secretRecords.sort((a, b) => new Date(a.updatedAt || a.createdAt || 0) - new Date(b.updatedAt || b.createdAt || 0));
+    const latestSecret = secretRecords.at(-1);
+    const localTime = new Date(state.secretBuddy?.updatedAt || state.secretBuddy?.createdAt || 0).getTime();
+    const remoteTime = new Date(latestSecret.updatedAt || latestSecret.createdAt || 0).getTime();
+    if (latestSecret.completed) {
+      if (remoteTime >= localTime) state.secretBuddy = null;
+    } else if (!state.secretBuddy || remoteTime >= localTime || state.secretBuddy.storage === 'drive') {
+      state.secretBuddy = { ...latestSecret, storage: latestSecret.storage || source };
+    }
+  }
+}
+
+function mergeChecklistRecords(records = [], source = 'drive') {
+  const checklists = records.filter(r => r.type === 'checklist' || r.id === 'shared-checklist');
+  if (!checklists.length) return;
+  checklists.sort((a, b) => new Date(a.updatedAt || a.createdAt || 0) - new Date(b.updatedAt || b.createdAt || 0));
+  const latest = checklists.at(-1);
+  const localTime = new Date(state.checklist?.updatedAt || state.checklist?.createdAt || 0).getTime();
   const remoteTime = new Date(latest.updatedAt || latest.createdAt || 0).getTime();
-  if (!state.bingo || remoteTime >= localTime || state.bingo.storage === 'drive') {
-    state.bingo = { ...latest, storage: 'drive' };
+  if (!state.checklist || remoteTime >= localTime || state.checklist.storage === 'drive') {
+    state.checklist = { ...latest, items: latest.items || {}, storage: latest.storage || source };
   }
 }
 
@@ -1338,7 +2136,7 @@ function exportRecapHtml() {
 
 
 async function downloadMomentMedia(momentId, mediaIndex = 0) {
-  const moment = state.moments.find(item => item.id === momentId);
+  const moment = activeList('moments').find(item => item.id === momentId);
   const media = moment?.media?.[mediaIndex];
   if (!media) return toast('ไม่พบไฟล์นี้ในอัลบั้ม');
   try {
@@ -1353,7 +2151,7 @@ async function downloadMomentMedia(momentId, mediaIndex = 0) {
 }
 
 async function downloadMomentAlbum(momentId) {
-  const moment = state.moments.find(item => item.id === momentId);
+  const moment = activeList('moments').find(item => item.id === momentId);
   const mediaList = moment?.media || [];
   if (!mediaList.length) return toast('โพสต์นี้ไม่มีอัลบั้ม');
   toast(`กำลังบันทึกอัลบั้ม ${mediaList.length} ไฟล์`);
@@ -1396,7 +2194,7 @@ async function installApp() {
 
 function resetLocal() {
   if (!confirm('ล้างข้อมูล Local ในเครื่องนี้? ข้อมูลบน Google Drive จะไม่ถูกลบ')) return;
-  localStorage.removeItem('kannajaburi-trip-state-v1');
+  ['kannajaburi-trip-state-v7','kannajaburi-trip-state-v6','kannajaburi-trip-state-v5','kannajaburi-trip-state-v4','kannajaburi-trip-state-v3'].forEach(key => localStorage.removeItem(key));
   state = loadState();
   toast('ล้างข้อมูล Local แล้ว');
   render();
@@ -1473,15 +2271,30 @@ function createMediaElement(url, mime = '', reelMode = false) {
 }
 
 function memberSelect(name, selected) {
-  const options = state.members.length ? state.members : [{ name: state.profile.name || 'แก๊งนี้' }];
+  const activeMembers = activeList('members');
+  const options = activeMembers.length ? activeMembers : [{ name: state.profile.name || 'แก๊งนี้' }];
   return `<select class="select" name="${escapeAttr(name)}">${options.map(m => `<option value="${escapeAttr(m.name)}" ${selected === m.name ? 'selected' : ''}>${escapeHtml(m.name)}</option>`).join('')}</select>`;
 }
 
+function uniqueActiveReactions(reactions = []) {
+  const byUser = new Map();
+  for (const r of reactions || []) {
+    const key = r.accountId || r.author || r.id;
+    const old = byUser.get(key);
+    const time = new Date(r.updatedAt || r.createdAt || 0).getTime();
+    const oldTime = old ? new Date(old.updatedAt || old.createdAt || 0).getTime() : -1;
+    if (time >= oldTime) byUser.set(key, r);
+  }
+  return [...byUser.values()].filter(r => r.emoji && !r.deleted);
+}
+
 function reactionSummary(reactions) {
-  if (!reactions.length) return '';
-  const counts = reactions.reduce((acc, r) => { acc[r.emoji] = (acc[r.emoji] || 0) + 1; return acc; }, {});
+  const active = uniqueActiveReactions(reactions);
+  if (!active.length) return '';
+  const counts = active.reduce((acc, r) => { acc[r.emoji] = (acc[r.emoji] || 0) + 1; return acc; }, {});
   return Object.entries(counts).map(([emoji, count]) => `${emoji} ${count}`).join(' · ');
 }
+
 
 function extractDriveFolderId(value) {
   if (!value) return '';
@@ -1512,3 +2325,11 @@ function escapeHtml(value = '') {
   return String(value).replace(/[&<>"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
 }
 function escapeAttr(value = '') { return escapeHtml(value).replace(/'/g, '&#39;'); }
+
+function safeTripId(value = '') {
+  return String(value || 'kannajaburi-trip')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'kannajaburi-trip';
+}

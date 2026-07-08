@@ -5,15 +5,19 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
 
 export const DRIVE_COLLECTIONS = [
+  'accounts',
+  'tripSettings',
   'members',
   'moments',
   'media',
   'reactions',
+  'comments',
   'votes',
   'quotes',
   'expenses',
   'quests',
   'games',
+  'checklists',
   'meta'
 ];
 
@@ -131,8 +135,8 @@ export class DriveSync {
     await this.uploadRecord('meta', {
       id: 'trip-manifest',
       app: 'กาญนะจ๊ะบุรีทริป',
-      version: '1.3.0',
-      mode: 'drive-first',
+      version: '1.6.0',
+      mode: 'firebase-first-drive-media',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       note: 'Shared Drive hub for Kannajaburi Trip PWA. Share the root folder with friends as Editor.'
@@ -254,28 +258,35 @@ export class DriveSync {
     return this.uploadRecord('reactions', reaction);
   }
 
-  async listSharedData({ collections = DRIVE_COLLECTIONS.filter(x => x !== 'media') } = {}) {
+  async listSharedData({ collections = DRIVE_COLLECTIONS.filter(x => x !== 'media'), full = false } = {}) {
     await this.ensureStructure();
     const result = {};
+    const state = this.getState();
+    state.settings.collectionSyncAt ||= {};
+    // ตั้ง cursor ไว้ก่อนอ่านเล็กน้อย เพื่อไม่พลาดไฟล์ที่อัปเดตระหว่างรอบ sync
+    const safeCursor = new Date(Date.now() - 5000).toISOString();
     for (const collection of collections) {
       if (collection === 'media') continue;
-      result[collection] = await this.listCollection(collection);
+      const since = (!full && state.settings.useIncrementalSync) ? state.settings.collectionSyncAt[collection] : '';
+      result[collection] = await this.listCollection(collection, since);
+      state.settings.collectionSyncAt[collection] = safeCursor;
     }
-    const state = this.getState();
     state.settings.lastSyncAt = new Date().toISOString();
     this.saveState();
     return result;
   }
 
-  async listCollection(collection) {
+  async listCollection(collection, since = '') {
     const children = await this.ensureStructure();
     const folderId = children[collection];
     if (!folderId) return [];
-    return this.listJsonFiles(folderId);
+    return this.listJsonFiles(folderId, since);
   }
 
-  async listJsonFiles(folderId) {
-    const q = [`'${escapeQ(folderId)}' in parents`, `mimeType = 'application/json'`, `trashed = false`].join(' and ');
+  async listJsonFiles(folderId, since = '') {
+    const filters = [`'${escapeQ(folderId)}' in parents`, `mimeType = 'application/json'`, `trashed = false`];
+    if (since) filters.push(`modifiedTime > '${escapeQ(since)}'`);
+    const q = filters.join(' and ');
     let pageToken = '';
     const files = [];
     do {

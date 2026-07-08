@@ -436,7 +436,7 @@ a { color: inherit; }
   .bingo-cell { min-height: 70px; font-size: .66rem; border-radius: 11px; padding: 6px; }
 }
 
-/* v1.3.0 Album Feed: full-resolution Drive-first media sharing */
+/* v1.4.0 Album Feed + Social Live Hub: full-resolution Drive-first media sharing */
 .album-shell { aspect-ratio: auto; min-height: 220px; padding: 10px; align-items: stretch; }
 .album-grid { width: 100%; display: grid; gap: 8px; }
 .album-grid.single { grid-template-columns: 1fr; }
@@ -499,3 +499,280 @@ a { color: inherit; }
   .album-item, .album-grid.single .album-item { min-height: 260px; }
   .album-shell { padding: 8px; }
 }
+
+
+/* v1.4.0 Social Live Hub */
+.comments-box {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(18,61,55,.12);
+  display: grid;
+  gap: 8px;
+}
+.comment-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: rgba(255,255,255,.55);
+  border: 1px solid rgba(18,61,55,.08);
+  border-radius: 14px;
+  padding: 8px 10px;
+  font-size: .84rem;
+}
+.comment-line b { color: var(--green-900); flex: 0 0 auto; }
+.comment-line span { min-width: 0; }
+.comment-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+.social-note {
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(255,210,139,.45), rgba(255,255,255,.5));
+  border: 1px solid rgba(239,155,85,.22);
+  color: var(--green-900);
+  line-height: 1.5;
+}
+@media (max-width: 620px) {
+  .comment-form { grid-template-columns: 1fr; }
+}
+
+/* v1.5.0 Firebase + Instagram-style Social Feed */
+.insta-shell { display: grid; gap: 16px; max-width: 860px; margin: 0 auto; }
+.stories-row { display: flex; gap: 14px; overflow-x: auto; align-items: center; background: rgba(255,255,255,.88); }
+.story { border: 0; background: transparent; color: var(--ink); min-width: 76px; display: grid; justify-items: center; gap: 7px; padding: 4px; }
+.story span, .story-ring { width: 62px; height: 62px; border-radius: 999px; display: grid; place-items: center; overflow: hidden; background: linear-gradient(135deg, var(--accent), var(--sunset)); color: #fff; font-weight: 900; }
+.story-ring { padding: 3px; border: 2px solid #fff; box-shadow: 0 0 0 3px rgba(239,111,78,.38); }
+.story-ring img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.story b { font-size: .72rem; max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.add-story span { font-size: 1.5rem; background: rgba(15,107,94,.13); color: var(--primary); border: 2px dashed rgba(15,107,94,.34); }
+.muted-story span { background: rgba(15,107,94,.08); color: var(--primary); }
+.feed-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.feed-toolbar h3 { margin: 0 0 6px; font-size: 1.35rem; }
+.muted-light { color: rgba(255,255,255,.74); margin: 0; line-height: 1.5; }
+.insta-feed { display: grid; gap: 18px; }
+.insta-card { overflow: hidden; padding: 0; background: rgba(255,255,255,.94); max-width: 760px; width: 100%; margin: 0 auto; }
+.post-head { display: flex; gap: 12px; align-items: center; padding: 14px 16px; border-bottom: 1px solid rgba(18,61,55,.08); }
+.post-head p { margin: 2px 0 0; color: var(--muted); font-size: .82rem; }
+.post-chip { margin-left: auto; padding: 6px 9px; border-radius: 999px; background: rgba(15,107,94,.08); color: var(--primary); font-size: .72rem; font-weight: 900; }
+.insta-body { padding: 13px 16px 16px; }
+.post-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.icon-btn { min-width: 38px; height: 38px; border: 0; border-radius: 999px; background: rgba(15,107,94,.08); color: var(--ink); display: inline-grid; place-items: center; font-weight: 900; font-size: 1rem; }
+.icon-btn.right { margin-left: auto; }
+.like-line, .caption-line { margin: 6px 0; line-height: 1.45; }
+.composer-modal { width: min(760px, 100%); max-height: min(92vh, 920px); overflow: auto; padding: 18px; border-radius: 28px; }
+.composer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.composer-head h3 { margin: 0 0 6px; font-size: 1.45rem; }
+.composer-tip, .firebase-panel { padding: 12px 14px; border-radius: 18px; background: rgba(15,107,94,.08); border: 1px solid rgba(15,107,94,.12); color: var(--ink); line-height: 1.5; }
+.firebase-panel { display: grid; gap: 12px; background: linear-gradient(135deg, rgba(255,210,139,.44), rgba(255,255,255,.52)); }
+.firebase-panel h3, .firebase-panel p { margin: 0; }
+.game-preview { padding: 14px; border-radius: 18px; background: linear-gradient(135deg, rgba(242,166,73,.2), rgba(15,107,94,.12)); display: flex; gap: 12px; align-items: center; }
+.game-preview span { font-size: 1.6rem; }
+.album-shell { background: #0b1716; }
+.insta-card .album-shell { border-radius: 0; padding: 0; }
+.insta-card .album-grid { border-radius: 0; }
+.insta-card .album-item { border-radius: 0; min-height: 460px; }
+.insta-card .album-grid.double .album-item, .insta-card .album-grid.multi .album-item { min-height: 300px; }
+@media (max-width: 900px) {
+  .feed-toolbar { flex-direction: column; align-items: stretch; }
+  .insta-card .album-item { min-height: 390px; }
+  .composer-modal { border-radius: 24px; padding: 14px; }
+}
+@media (max-width: 620px) {
+  .stories-row { margin-inline: -4px; border-radius: 22px; }
+  .insta-card { border-radius: 22px; }
+  .post-head { padding: 12px; }
+  .insta-card .album-item, .insta-card .album-grid.double .album-item, .insta-card .album-grid.multi .album-item { min-height: 340px; }
+  .post-actions { gap: 5px; }
+  .icon-btn { min-width: 34px; height: 34px; }
+}
+
+/* v1.6.0 IG-style Account + Admin Drive Hub refresh */
+:root {
+  --ig-bg: #f7f7f8;
+  --ig-surface: #ffffff;
+  --ig-line: #e8e8ed;
+  --ig-text: #151515;
+  --ig-muted: #737373;
+  --ig-pink: #d62976;
+  --ig-purple: #962fbf;
+  --ig-orange: #feda75;
+}
+body {
+  color: var(--ig-text);
+  background:
+    radial-gradient(circle at 5% 0%, rgba(254,218,117,.32), transparent 18rem),
+    radial-gradient(circle at 98% 6%, rgba(214,41,118,.20), transparent 22rem),
+    linear-gradient(180deg, #ffffff 0%, #f4f5f8 46%, #eef7f4 100%);
+}
+.shell { grid-template-columns: 245px 1fr; gap: 18px; padding: 16px; }
+.sidebar {
+  background: rgba(255,255,255,.86);
+  color: var(--ig-text);
+  border: 1px solid var(--ig-line);
+  box-shadow: 0 20px 55px rgba(15,23,42,.08);
+}
+.brand h1, .brand p { color: var(--ig-text); }
+.brand-badge {
+  background: linear-gradient(135deg, var(--ig-orange), var(--ig-pink), var(--ig-purple));
+  box-shadow: 0 12px 30px rgba(214,41,118,.26);
+}
+.nav button { color: #363636; background: transparent; border: 1px solid transparent; }
+.nav button.active, .nav button:hover {
+  background: #fff;
+  border-color: var(--ig-line);
+  color: var(--ig-text);
+  box-shadow: 0 10px 26px rgba(15,23,42,.06);
+}
+.main { max-width: 1020px; margin: 0 auto; width: 100%; }
+.topbar {
+  position: sticky;
+  top: 12px;
+  z-index: 8;
+  color: var(--ig-text);
+  background: rgba(255,255,255,.82);
+  border: 1px solid var(--ig-line);
+  border-radius: 28px;
+  padding: 14px;
+  box-shadow: 0 14px 38px rgba(15,23,42,.08);
+  backdrop-filter: blur(22px);
+}
+.page-title h2, .page-title p { color: var(--ig-text); }
+.btn.accent, .btn.primary {
+  background: linear-gradient(135deg, var(--ig-orange), var(--ig-pink), var(--ig-purple));
+  color: #fff;
+  box-shadow: 0 14px 26px rgba(214,41,118,.19);
+}
+.btn.ghost { color: var(--ig-text); background: #fff; border: 1px solid var(--ig-line); }
+.card, .stories-row, .insta-card, .feed-toolbar {
+  background: rgba(255,255,255,.94);
+  border: 1px solid var(--ig-line);
+  box-shadow: 0 18px 44px rgba(15,23,42,.075);
+  color: var(--ig-text);
+}
+.glass { background: rgba(255,255,255,.92); border-color: var(--ig-line); color: var(--ig-text); }
+.muted, .muted-light { color: var(--ig-muted) !important; }
+.insta-shell { max-width: 720px; gap: 14px; }
+.stories-row {
+  border-radius: 22px;
+  padding: 12px 14px;
+  box-shadow: 0 10px 26px rgba(15,23,42,.06);
+}
+.story-ring, .story span {
+  background: linear-gradient(135deg, #feda75 4%, #fa7e1e 30%, #d62976 62%, #962fbf 100%);
+  box-shadow: 0 0 0 3px #fff, 0 0 0 5px rgba(214,41,118,.38);
+}
+.add-story span { background: #fff; color: var(--ig-pink); border: 2px dashed #d62976; box-shadow: none; }
+.feed-toolbar {
+  border-radius: 24px;
+  padding: 14px 16px;
+}
+.feed-toolbar .action-row .btn { border-radius: 999px; }
+.insta-card {
+  border-radius: 24px;
+  max-width: 650px;
+  overflow: hidden;
+}
+.post-head {
+  padding: 13px 14px;
+  background: #fff;
+  border-bottom: 1px solid var(--ig-line);
+}
+.avatar {
+  background: linear-gradient(135deg, var(--ig-orange), var(--ig-pink)) !important;
+  color: #fff;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 2px rgba(214,41,118,.26);
+}
+.avatar.big { width: 64px; height: 64px; font-size: 1.2rem; }
+.post-chip {
+  background: #f5f5f5;
+  color: #565656;
+}
+.album-shell { background: #050505; }
+.album-item { background: #050505; }
+.album-item img, .album-item video { object-fit: cover; }
+.insta-body { background: #fff; }
+.icon-btn {
+  background: transparent;
+  font-size: 1.18rem;
+  transition: transform .14s ease, background .14s ease;
+}
+.icon-btn:hover { background: #f4f4f5; transform: translateY(-1px) scale(1.03); }
+.icon-btn.reacted {
+  background: rgba(214,41,118,.12);
+  box-shadow: inset 0 0 0 1px rgba(214,41,118,.22);
+  transform: scale(1.08);
+}
+.like-line { color: #262626; }
+.caption-line { color: #262626; }
+.comment-line { background: #f8f8f8; border-color: var(--ig-line); }
+.comment-form .input { border-radius: 999px; background: #fafafa; }
+.sync-pill {
+  background: #fff;
+  border-color: var(--ig-line);
+  color: var(--ig-text);
+}
+.account-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid var(--ig-line);
+  color: var(--ig-text);
+  max-width: 100%;
+}
+.account-mini span { font-size: .78rem; color: var(--ig-pink); font-weight: 900; }
+.account-mini b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-card-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 22px;
+  background: linear-gradient(135deg, #fff, #fff7fb);
+  border: 1px solid var(--ig-line);
+}
+.profile-card-preview.compact { justify-content: space-between; flex-wrap: wrap; }
+.profile-card-preview p { margin: 2px 0 0; color: var(--ig-muted); }
+.account-modal .social-note {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #7c2d12;
+}
+.hero {
+  background:
+    linear-gradient(180deg, rgba(0,0,0,.06), rgba(0,0,0,.58)),
+    radial-gradient(circle at 18% 18%, rgba(254,218,117,.74), transparent 8rem),
+    linear-gradient(135deg, #962fbf, #d62976 45%, #fa7e1e);
+}
+.firebase-panel { background: linear-gradient(135deg, #fff, #fff7ed); border-color: #fed7aa; }
+@media (max-width: 900px) {
+  .shell { display: block; padding: 10px; }
+  .topbar { top: 8px; border-radius: 22px; }
+  .main { padding-bottom: calc(84px + var(--safe-bottom)); }
+  .mobile-nav {
+    background: rgba(255,255,255,.94);
+    border-top: 1px solid var(--ig-line);
+    color: var(--ig-text);
+    box-shadow: 0 -14px 34px rgba(15,23,42,.08);
+  }
+  .mobile-nav button { color: #565656; }
+  .mobile-nav button.active { background: #f2f2f4; color: #111; }
+}
+@media (max-width: 620px) {
+  .topbar .action-row { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+  .topbar .action-row .btn:first-child { grid-column: 1 / -1; }
+  .insta-shell { max-width: 100%; }
+  .feed-toolbar .action-row { display: grid; grid-template-columns: 1fr; width: 100%; }
+  .insta-card { border-radius: 18px; }
+  .stories-row { border-radius: 18px; }
+}
+
+/* v1.7.0 integration polish */
+.action-row.tight { gap: 6px; flex-wrap: wrap; }
+.compact-btn { padding: 7px 10px; min-height: 34px; font-size: .86rem; }
+.member-chip .mini-link { margin-left: 4px; }
+.mini-link.danger { color: var(--danger); font-weight: 800; }
+.icon-btn.danger { color: var(--danger); }
+.quest-card input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--ig-pink, #d62976); margin-right: 8px; }
