@@ -1,8 +1,32 @@
-# กาญนะจ๊ะบุรีทริป PWA v1.7.0 — Full System Integration
+# กาญนะจ๊ะบุรีทริป PWA v1.8.0 — App UI + Critical Bugfix
 
-PWA สำหรับทริปกาญจนบุรี/สังขละบุรีแบบ Social Memory Book: Feed คล้าย Instagram, บัญชีแยกแต่ละคน, Firebase realtime สำหรับข้อมูลโซเชียล และ Google Drive สำหรับเก็บรูป/วิดีโอต้นฉบับเต็มความละเอียด
+เวอร์ชันนี้แก้บัคด่วนเรื่องระบบบัญชีรีเฟรชแล้วต้องเข้าใหม่, ปุ่มกากบาท/ยกเลิกใน modal กดไม่ติดบางจุด, และรีดีไซน์ UI/CSS ให้เหมือนแอพโซเชียลจริงมากขึ้นโดยลด CSS เก่าที่ทับซ้อนกัน
 
-## สิ่งที่อัปเดตใน v1.7.0
+## สิ่งที่แก้ใน v1.8.0
+
+- เรียก `restoreProfileFromSession()` ตอนเริ่มแอพจริง เพื่อดึงบัญชีที่เคยบันทึกไว้กลับมาหลังรีเฟรช
+- แยก session บัญชีออกจาก state หลักด้วย `kannajaburi-trip-active-account-v1`
+- ปรับการบันทึกบัญชีให้ปิด modal ทันทีหลังบันทึกในเครื่อง แล้วค่อย sync Firebase/Drive เบื้องหลัง
+- แก้ปุ่ม ✕ / แตะฉากหลัง / กด Esc ให้ปิด modal ได้เสถียรขึ้น
+- เพิ่ม event listener แบบ capture เพื่อให้ปุ่มปิดใน PWA/mobile ไม่โดน DOM ชั้นอื่นบัง
+- อัปเดต storage schema เป็น v9 และ service worker cache เป็น v1.8.0
+- แก้ Reset Local ให้ล้าง storage key ปัจจุบันจริง ไม่เหลือค่าเก่าค้าง
+- เปลี่ยน CSS เป็นชุดใหม่แบบ clean modern app ลดสไตล์ซ้ำ/เก่า/วงเล็บ CSS เกิน
+
+---
+
+
+## Hotfix ใน v1.8.0
+
+- แก้บัคระบบบัญชีที่รีเฟรชแล้วเด้งให้กรอกบัญชีใหม่ซ้ำ
+- แยก account session ออกจาก UI runtime state เพื่อให้ชื่อบัญชี/สิทธิ์/สีประจำตัวจำค้างในเครื่องได้จริง
+- ล้างค่า `accountModalOpen` ที่เคยถูกบันทึกผิดใน v1.7.0
+- ตั้ง Firebase Anonymous Auth ให้ใช้ local persistence เมื่อ browser รองรับ
+- แก้ปุ่มกากบาทในหน้าเพิ่มโมเมนต์และหน้าบัญชีให้กดปิดได้จริง
+- ปรับ modal backdrop ให้แตะพื้นที่มืดเพื่อปิดได้ แต่กด/กรอกข้อมูลข้างใน modal ไม่ปิดเอง
+- อัปเดต Service Worker cache เป็น v1.8.0 เพื่อบังคับโหลดไฟล์ใหม่
+
+## สิ่งที่อัปเดตใน v1.8.0
 
 ### 1) Feed / ความทรงจำ
 - หน้า Feed แสดงโพสต์แบบ Social Feed ไม่แสดงฟอร์มเพิ่มโมเมนต์ค้างอยู่บนหน้า
@@ -116,10 +140,10 @@ Google Drive ใช้เป็น Media Hub และ backup JSON:
 - Firebase ใช้ realtime data ได้ดีสำหรับ Feed/Comment/Reaction แต่รูป/วิดีโอ full-res ยังเก็บใน Google Drive ตามโจทย์
 - ถ้าต้องการให้สมาชิกไม่ต้อง authorize Drive เลย ต้องเพิ่ม backend เช่น Firebase Cloud Functions หรือเปลี่ยน media storage เป็น Firebase Storage แล้วให้ Admin backup ไป Drive ภายหลัง
 
-## ตรวจแล้วใน v1.7.0
+## ตรวจแล้วใน v1.8.0
 
 - JS syntax check ผ่าน: app.js, state.js, drive.js, firebaseHub.js
-- Service Worker cache version เป็น v1.7.0
+- Service Worker cache version เป็น v1.8.0
 - Storage schema เป็น v7
 - Soft-delete ใช้กับ Feed, Comment, Vote, Expense, Quote, Member
 - Active list ถูกใช้ใน Recap, Expense, Feed และระบบแสดงผลหลัก

@@ -1,13 +1,13 @@
 {
   "name": "กาญนะจ๊ะบุรีทริป",
   "short_name": "กาญทริป",
-  "description": "PWA เกมทริป สมุดความทรงจำ Album Feed และ Firebase Live Feed + Accounts + Admin Drive Hub + Google Drive Media Hub สำหรับแชร์โมเมนต์ คอมเมนต์ และรูปเต็มความละเอียดในทริปกาญจนบุรี",
+  "description": "กาญนะจ๊ะบุรีทริป PWA แบบ Social Memory App: Feed, Accounts, Games, Quest, Vote, Expense, Firebase Live Feed และ Google Drive Media Hub สำหรับแชร์รูปเต็มความละเอียด",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0d2c28",
-  "theme_color": "#123d37",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
   "icons": [
     {
       "src": "./assets/icons/icon-192.png",
