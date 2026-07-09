@@ -28,6 +28,7 @@ let composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ต
 let syncTimer = null;
 let isSyncing = false;
 let syncStatus = { text: 'Local cache ready', tone: 'idle' };
+let uploadUi = { active: false, text: '', tone: 'idle' };
 let nextSyncAt = 0;
 
 const app = document.querySelector('#app');
@@ -948,38 +949,57 @@ function renderMembers() {
 function renderFeed() {
   const sorted = activeList('moments').sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   const storyMoments = sorted.filter(m => (m.type === 'story' || m.story === true || m.source === 'story') && (m.media || []).length);
-  const recentStoryFallback = sorted.filter(m => (m.media || []).length && m.type !== 'story').slice(0, Math.max(0, 8 - storyMoments.length));
-  const stories = [...storyMoments, ...recentStoryFallback].slice(0, 12);
+  const recentStoryFallback = sorted.filter(m => (m.media || []).length && m.type !== 'story').slice(0, Math.max(0, 10 - storyMoments.length));
+  const stories = [...storyMoments, ...recentStoryFallback].slice(0, 14);
   const feedPosts = sorted.filter(m => m.type !== 'story');
   return `
-    <section class="insta-shell">
-      <div class="stories-row card pad">
-        <button class="story add-story" data-action="quick-story">
-          <span>＋</span><b>Your story</b>
+    <section class="ig-screen">
+      <header class="ig-topbar">
+        <div class="ig-wordmark">
+          <span class="ig-logo-dot"></span>
+          <b>${escapeHtml(state.trip.title || state.appName || 'Tripgram')}</b>
+        </div>
+        <div class="ig-top-actions">
+          <button class="ig-icon-action" data-action="quick-story" aria-label="เพิ่ม Story">◎</button>
+          <button class="ig-icon-action" data-action="open-composer" aria-label="เพิ่มโพสต์">＋</button>
+          <button class="ig-icon-action" data-action="open-account" aria-label="บัญชีของฉัน">${currentAvatar('avatar mini-avatar')}</button>
+        </div>
+      </header>
+
+      <div class="ig-stories-strip" aria-label="Stories">
+        <button class="ig-story-bubble add" data-action="quick-story">
+          <span class="story-avatar-wrap">${currentAvatar('avatar story-avatar')}<i>＋</i></span>
+          <b>Your story</b>
         </button>
         ${stories.map((m, index) => `
-          <button class="story" data-action="open-story" data-id="${escapeAttr(m.id)}" data-index="${index}">
-            <span class="story-ring">${renderStoryThumb(m)}</span>
+          <button class="ig-story-bubble" data-action="open-story" data-id="${escapeAttr(m.id)}" data-index="${index}">
+            <span class="story-avatar-wrap">${renderStoryThumb(m)}</span>
             <b>${escapeHtml((m.author || 'เพื่อน').slice(0, 12))}</b>
           </button>
-        `).join('') || `<div class="story muted-story"><span>📸</span><b>ยังไม่มี Story</b></div>`}
+        `).join('') || `<div class="ig-story-bubble muted"><span class="story-avatar-wrap">📸</span><b>ยังไม่มี</b></div>`}
       </div>
 
-      <div class="feed-toolbar glass pad">
-        <div>
-          <h3>Memory Feed</h3>
-          <p class="muted-light">ฟีดรวมของทริป เหมือนโซเชียลเฉพาะแก๊ง</p>
-        </div>
-        <div class="action-row">
-          <button class="btn primary" data-action="quick-story">◎ Story</button>
-          <button class="btn accent" data-action="open-composer">＋ Post</button>
-        </div>
+      <div class="ig-compose-strip">
+        <button data-action="open-composer">＋ เพิ่มโพสต์</button>
+        <button data-action="quick-checkin">📍 เช็กอิน</button>
+        <button data-action="quick-story">◎ Story</button>
       </div>
 
-      <div class="feed insta-feed">
-        ${feedPosts.map(renderMomentCard).join('') || '<div class="card empty">ยังไม่มีโพสต์ กด “Post” เพื่อเปิดอัลบั้มแรกของทริป 📸</div>'}
+      <div class="ig-feed-list">
+        ${uploadUi.active ? renderUploadNotice() : ''}
+        ${feedPosts.map(renderMomentCard).join('') || '<div class="card empty ig-empty-feed">ยังไม่มีโพสต์ กด “เพิ่มโพสต์” เพื่อเปิดอัลบั้มแรกของทริป 📸</div>'}
       </div>
     </section>
+  `;
+}
+
+function renderUploadNotice() {
+  const tone = uploadUi.tone || 'info';
+  return `
+    <div class="upload-live-card ${escapeAttr(tone)}">
+      <span class="upload-spinner" aria-hidden="true"></span>
+      <div><b>กำลังจัดการโพสต์</b><p>${escapeHtml(uploadUi.text || 'กำลังอัปโหลดไฟล์เต็มความละเอียด…')}</p></div>
+    </div>
   `;
 }
 
@@ -998,31 +1018,50 @@ function renderMomentCard(moment) {
   const mediaHtml = renderAlbumMedia(mediaList, moment.id);
   const reactions = uniqueActiveReactions((state.reactions || []).filter(r => r.momentId === moment.id));
   const reactionText = reactionSummary(reactions);
-  const albumText = mediaList.length ? `${mediaList.length} ไฟล์ · รูป/วิดีโอต้นฉบับ` : 'โพสต์ข้อความ';
+  const comments = (state.comments || []).filter(c => c.momentId === moment.id && !c.deleted);
+  const albumText = mediaList.length ? `${mediaList.length} ไฟล์ · Full resolution` : 'โพสต์ข้อความ';
+  const mediaPending = mediaList.some(media => media.pendingUpload || (!media.driveFileId && !media.webViewLink && media.localBlobId));
+  const uploadState = moment.uploadState || (mediaPending ? 'pending' : moment.storage === 'firebase' || moment.storage === 'drive' ? 'synced' : 'local');
   const canDelete = canManageItem(moment);
   return `
-    <article class="card moment-card insta-card">
-      <header class="post-head">
-        ${renderAvatar({ accountId: moment.authorId, name: moment.author, color: memberColor(moment.author) })}
-        <div>
-          <b>${escapeHtml(moment.author || 'ไม่ระบุชื่อ')}</b>
-          <p>${typeIcon} ${escapeHtml(moment.place || moment.mood || 'กาญนะจ๊ะบุรี')} · ${formatThaiDate(moment.createdAt)}</p>
+    <article class="ig-post" data-post-id="${escapeAttr(moment.id)}">
+      <header class="ig-post-head">
+        <div class="ig-post-user">
+          ${renderAvatar({ accountId: moment.authorId, name: moment.author, color: memberColor(moment.author) })}
+          <div>
+            <b>${escapeHtml(moment.author || 'ไม่ระบุชื่อ')}</b>
+            <span>${typeIcon} ${escapeHtml(moment.place || moment.mood || state.trip.destination || 'Trip moment')} · ${formatThaiDate(moment.createdAt)}</span>
+          </div>
         </div>
-        <span class="post-chip">${liveStorageLabel(moment)}</span>
-        ${canDelete ? `<button class="icon-btn danger" title="ลบโพสต์นี้" data-action="delete-moment" data-id="${escapeAttr(moment.id)}">🗑️</button>` : ''}
+        <div class="ig-post-menu">
+          <span class="ig-storage-dot" title="${escapeAttr(liveStorageLabel(moment))}"></span>
+          ${canDelete ? `<button class="ig-menu-btn danger" title="ลบโพสต์นี้" data-action="delete-moment" data-id="${escapeAttr(moment.id)}">⋯</button>` : `<button class="ig-menu-btn" title="เมนู">⋯</button>`}
+        </div>
       </header>
-      <div class="moment-media album-shell">${mediaHtml}</div>
-      <div class="moment-body insta-body">
-        <div class="post-actions">
-          ${['❤️', '😂', '🔥', '😍'].map(emoji => `<button class="icon-btn ${activeReactionFor(moment.id)?.emoji === emoji ? 'reacted' : ''}" title="React ได้คนละ 1 ครั้ง เปลี่ยนได้" data-action="react" data-id="${moment.id}" data-emoji="${emoji}">${emoji}</button>`).join('')}
-          <button class="icon-btn" data-action="toggle-feature" data-id="${moment.id}">${moment.featured ? '⭐' : '☆'}</button>
-          <button class="icon-btn" data-action="open-composer" data-source="remix" data-caption="${escapeAttr('โมเมนต์ต่อจาก: ' + (moment.caption || ''))}" data-place="${escapeAttr(moment.place || '')}">＋</button>
-          ${mediaList.length ? `<button class="icon-btn right" data-action="download-album" data-id="${moment.id}">⬇️</button>` : ''}
+
+      <div class="ig-media-frame ${mediaList.length ? '' : 'no-media'}">
+        ${mediaHtml}
+      </div>
+
+      <div class="ig-actions-row">
+        <div class="ig-left-actions">
+          ${['❤️', '😂', '🔥', '😍'].map(emoji => `<button class="ig-action ${activeReactionFor(moment.id)?.emoji === emoji ? 'reacted' : ''}" title="React ได้คนละ 1 ครั้ง เปลี่ยนได้" data-action="react" data-id="${escapeAttr(moment.id)}" data-emoji="${emoji}">${emoji}</button>`).join('')}
+          <button class="ig-action" data-action="focus-comment" data-id="${escapeAttr(moment.id)}">💬</button>
+          <button class="ig-action" data-action="open-composer" data-source="remix" data-caption="${escapeAttr('โมเมนต์ต่อจาก: ' + (moment.caption || ''))}" data-place="${escapeAttr(moment.place || '')}">➤</button>
         </div>
-        ${reactionText ? `<p class="like-line"><b>${reactionText}</b> <span class="muted">· ${reactions.length} reaction</span></p>` : ''}
-        <p class="caption-line"><b>${escapeHtml(moment.author || 'เพื่อน')}</b> ${escapeHtml(moment.caption || 'Untitled Moment')}</p>
-        ${moment.gps ? `<a class="gps-link" href="https://www.google.com/maps?q=${encodeURIComponent(moment.gps.lat + ',' + moment.gps.lng)}" target="_blank" rel="noreferrer">📍 ดูตำแหน่งเช็กอิน</a>` : ''}
-        <p class="small muted">${escapeHtml(albumText)} ${moment.featured ? '· อยู่ใน Vlog Studio' : ''}</p>
+        <div class="ig-right-actions">
+          <button class="ig-action" data-action="toggle-feature" data-id="${escapeAttr(moment.id)}">${moment.featured ? '⭐' : '🔖'}</button>
+          ${mediaList.length ? `<button class="ig-action" data-action="download-album" data-id="${escapeAttr(moment.id)}">⬇️</button>` : ''}
+        </div>
+      </div>
+
+      <div class="ig-post-body">
+        ${renderPostUploadStatus(moment, uploadState, mediaPending)}
+        ${reactionText ? `<p class="ig-likes"><b>${reactionText}</b> <span>· ${reactions.length} reaction</span></p>` : ''}
+        <p class="ig-caption"><b>${escapeHtml(moment.author || 'เพื่อน')}</b> ${escapeHtml(moment.caption || 'Untitled Moment')}</p>
+        ${moment.gps ? `<a class="gps-link ig-location" href="https://www.google.com/maps?q=${encodeURIComponent(moment.gps.lat + ',' + moment.gps.lng)}" target="_blank" rel="noreferrer">📍 ดูตำแหน่งเช็กอิน</a>` : ''}
+        <p class="ig-meta">${escapeHtml(albumText)}${moment.featured ? ' · อยู่ใน Vlog Studio' : ''}</p>
+        ${comments.length ? `<button class="ig-view-comments" data-action="toggle-comments" data-id="${escapeAttr(moment.id)}">ดูคอมเมนต์ทั้งหมด ${comments.length} รายการ</button>` : ''}
         ${renderComments(moment.id)}
       </div>
     </article>
@@ -1032,6 +1071,19 @@ function renderMomentCard(moment) {
 function memberColor(name) {
   const person = accountForDisplay({ name });
   return person?.color || '#0f6b5e';
+}
+
+function renderPostUploadStatus(moment, uploadState, mediaPending) {
+  if (uploadState === 'uploading') {
+    return `<div class="post-upload-state uploading"><span class="upload-spinner"></span><b>กำลังอัปโหลดไฟล์เต็มความละเอียด…</b></div>`;
+  }
+  if (uploadState === 'error') {
+    return `<div class="post-upload-state error"><span>⚠️</span><b>อัปโหลดไม่สำเร็จ</b><button class="mini-link" data-action="retry-upload-moment" data-id="${escapeAttr(moment.id)}">ลองอีกครั้ง</button></div>`;
+  }
+  if (mediaPending) {
+    return `<div class="post-upload-state pending"><span>⏳</span><b>รอส่งไฟล์เต็มขึ้น Hub</b><button class="mini-link" data-action="retry-upload-moment" data-id="${escapeAttr(moment.id)}">ส่งตอนนี้</button></div>`;
+  }
+  return '';
 }
 
 function renderComments(momentId) {
@@ -1054,8 +1106,13 @@ function renderComments(momentId) {
 
 function renderAlbumMedia(mediaList, momentId) {
   if (!mediaList.length) return '<div class="empty album-empty">ไม่มีรูป แต่มีเรื่องให้จำ</div>';
-  const klass = mediaList.length === 1 ? 'single' : mediaList.length === 2 ? 'double' : 'multi';
-  return `<div class="album-grid ${klass}">${mediaList.map((media, index) => renderMediaItem(media, momentId, index)).join('')}</div>`;
+  const count = mediaList.length;
+  return `
+    <div class="album-carousel" aria-label="อัลบั้ม ${count} ไฟล์">
+      ${count > 1 ? `<span class="album-count-badge">1/${count}</span>` : ''}
+      ${mediaList.map((media, index) => renderMediaItem(media, momentId, index)).join('')}
+    </div>
+  `;
 }
 
 function renderMediaItem(media, momentId, index) {
@@ -1337,124 +1394,128 @@ function renderTools() {
   const total = expenseList.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const isAdmin = isAdminAccount();
   const inviteReady = state.settings.firebaseEnabled && state.settings.firebaseProjectId && state.settings.firebaseApiKey && state.settings.firebaseAppId;
-  const tripPanel = isAdmin ? `
-        <h3>⚙️ ตั้งค่าทริป</h3>
-        <form class="stack trip-settings-form" data-form="trip">
-          <div class="grid two">
-            <div class="field"><label>ชื่อทริป</label><input class="input" name="title" value="${escapeAttr(state.trip.title || '')}" placeholder="เช่น Chiangmai Friends Trip" /></div>
-            <div class="field"><label>ปลายทาง</label><input class="input" name="destination" value="${escapeAttr(state.trip.destination || '')}" placeholder="เช่น เชียงใหม่ / ภูเก็ต / เขาใหญ่" /></div>
-            <div class="field"><label>ช่วง/วันนี้</label><input class="input" name="day" value="${escapeAttr(state.trip.day || '')}" placeholder="Day 1 — เดินทาง / คืนแรก" /></div>
-            <div class="field"><label>Mood วันนี้</label><input class="input" name="mood" value="${escapeAttr(state.trip.mood || '')}" placeholder="คืนนี้ต้องมีตำนาน" /></div>
-          </div>
-          <div class="field"><label>คำอธิบายทริป</label><input class="input" name="subtitle" value="${escapeAttr(state.trip.subtitle || '')}" placeholder="ประโยคสั้น ๆ สำหรับหน้าแรก" /></div>
-          <div class="field"><label>แผนวันนี้ / สิ่งต่อไป</label><input class="input" name="nextPlan" value="${escapeAttr(state.trip.nextPlan || '')}" placeholder="เช่น เช็กอินที่พัก > เล่นเกม > Vlog Night" /></div>
-          <button class="btn primary" type="submit">บันทึกข้อมูลทริป</button>
-        </form>` : `
-        <h3>🏕️ ข้อมูลทริป</h3>
-        <div class="trip-summary-card">
-          <span class="tag">${escapeHtml(state.trip.day || 'Trip Mode')}</span>
-          <h2>${escapeHtml(state.trip.title || 'ทริปของเรา')}</h2>
-          <p>${escapeHtml(state.trip.destination || 'ปลายทางของทริป')}</p>
-          <small>${escapeHtml(state.trip.nextPlan || state.trip.subtitle || 'ดูแผนวันนี้และโมเมนต์จากเพื่อนในหน้า Home/Feed')}</small>
-        </div>`;
+  const connectedText = firebase.connected ? 'Social Feed online' : state.settings.firebaseEnabled ? 'พร้อมเชื่อมต่ออัตโนมัติ' : 'ยังไม่ได้ตั้งค่า Hub';
+  const mediaText = drive.connected ? 'Drive media online' : state.settings.driveRootFolderId ? 'พื้นที่รูปพร้อมเชื่อมต่อ' : 'ยังไม่มีพื้นที่รูป';
 
-  const adminHubPanel = `
-        <form class="stack" data-form="settings">
-          <div class="firebase-panel">
-            <h3>Admin Hub</h3>
-            <p class="muted">ตั้งค่าครั้งเดียว สมาชิกจะรับค่า Hub ผ่านลิงก์เชิญและ Firebase โดยไม่ต้องเห็นหน้าตั้งค่า</p>
-            <label class="checkline"><input type="checkbox" name="firebaseEnabled" ${state.settings.firebaseEnabled ? 'checked' : ''}> เปิดการแชร์ Feed แบบเรียลไทม์</label>
-            <div class="grid two">
-              <div class="field"><label>Trip ID</label><input class="input" name="firebaseTripId" value="${escapeAttr(state.settings.firebaseTripId || 'kannajaburi-trip')}" placeholder="kannajaburi-trip" /></div>
-              <div class="field"><label>Project ID</label><input class="input" name="firebaseProjectId" value="${escapeAttr(state.settings.firebaseProjectId || '')}" placeholder="your-project-id" /></div>
-              <div class="field"><label>API Key</label><input class="input" name="firebaseApiKey" value="${escapeAttr(state.settings.firebaseApiKey || '')}" placeholder="AIza..." /></div>
-              <div class="field"><label>Auth Domain</label><input class="input" name="firebaseAuthDomain" value="${escapeAttr(state.settings.firebaseAuthDomain || '')}" placeholder="project.firebaseapp.com" /></div>
-              <div class="field"><label>App ID</label><input class="input" name="firebaseAppId" value="${escapeAttr(state.settings.firebaseAppId || '')}" placeholder="1:xxx:web:xxx" /></div>
-              <div class="field"><label>Storage Bucket</label><input class="input" name="firebaseStorageBucket" value="${escapeAttr(state.settings.firebaseStorageBucket || '')}" placeholder="project.appspot.com" /></div>
-              <div class="field"><label>Messaging Sender ID</label><input class="input" name="firebaseMessagingSenderId" value="${escapeAttr(state.settings.firebaseMessagingSenderId || '')}" placeholder="123456789" /></div>
-            </div>
-          </div>
-          <div class="field"><label>Google OAuth Client ID</label><input class="input" name="driveClientId" value="${escapeAttr(state.settings.driveClientId)}" placeholder="xxxxx.apps.googleusercontent.com" /></div>
-          <div class="field"><label>Trip Drive Folder ID หรือ URL โฟลเดอร์</label><input class="input" name="driveRootFolderId" value="${escapeAttr(state.settings.driveRootFolderId)}" placeholder="https://drive.google.com/drive/folders/..." /></div>
-          <div class="field"><label>ชื่อโฟลเดอร์ถ้าจะให้แอพสร้างใหม่</label><input class="input" name="driveRootFolderName" value="${escapeAttr(state.settings.driveRootFolderName)}" /></div>
-          <label class="checkline"><input type="checkbox" name="autoSyncOnStart" ${state.settings.autoSyncOnStart ? 'checked' : ''}> อัปเดตข้อมูลตอนเปิดแอพ</label>
-          <label class="checkline"><input type="checkbox" name="liveSyncEnabled" ${state.settings.liveSyncEnabled ? 'checked' : ''}> อัปเดตข้อมูลระหว่างใช้งาน</label>
-          <input type="hidden" name="driveManagedByAdmin" value="on" />
-          <div class="field"><label>ความถี่ Auto Sync (วินาที)</label><input class="input" name="syncIntervalSec" type="number" min="15" max="120" value="${Number(state.settings.syncIntervalSec || 20)}" /></div>
+  const adminHubDetails = isAdmin ? `
+    <details class="more-details admin-advanced">
+      <summary><span>🔐 ตั้งค่าหลังบ้าน Admin</span><small>Firebase / Drive / Invite</small></summary>
+      <form class="stack" data-form="settings">
+        <div class="grid two compact-form-grid">
+          <label class="checkline wide"><input type="checkbox" name="firebaseEnabled" ${state.settings.firebaseEnabled ? 'checked' : ''}> เปิด Social Feed แบบเรียลไทม์</label>
+          <div class="field"><label>Trip ID</label><input class="input" name="firebaseTripId" value="${escapeAttr(state.settings.firebaseTripId || 'kannajaburi-trip')}" /></div>
+          <div class="field"><label>Project ID</label><input class="input" name="firebaseProjectId" value="${escapeAttr(state.settings.firebaseProjectId || '')}" /></div>
+          <div class="field"><label>API Key</label><input class="input" name="firebaseApiKey" value="${escapeAttr(state.settings.firebaseApiKey || '')}" /></div>
+          <div class="field"><label>Auth Domain</label><input class="input" name="firebaseAuthDomain" value="${escapeAttr(state.settings.firebaseAuthDomain || '')}" /></div>
+          <div class="field"><label>App ID</label><input class="input" name="firebaseAppId" value="${escapeAttr(state.settings.firebaseAppId || '')}" /></div>
+          <div class="field"><label>Storage Bucket</label><input class="input" name="firebaseStorageBucket" value="${escapeAttr(state.settings.firebaseStorageBucket || '')}" /></div>
+          <div class="field"><label>Messaging Sender ID</label><input class="input" name="firebaseMessagingSenderId" value="${escapeAttr(state.settings.firebaseMessagingSenderId || '')}" /></div>
+          <div class="field wide"><label>Google OAuth Client ID</label><input class="input" name="driveClientId" value="${escapeAttr(state.settings.driveClientId)}" /></div>
+          <div class="field wide"><label>Trip Drive Folder ID หรือ URL โฟลเดอร์</label><input class="input" name="driveRootFolderId" value="${escapeAttr(state.settings.driveRootFolderId)}" /></div>
+          <div class="field"><label>ชื่อโฟลเดอร์รูป</label><input class="input" name="driveRootFolderName" value="${escapeAttr(state.settings.driveRootFolderName)}" /></div>
+          <div class="field"><label>Auto Sync (วินาที)</label><input class="input" name="syncIntervalSec" type="number" min="15" max="120" value="${Number(state.settings.syncIntervalSec || 20)}" /></div>
+          <label class="checkline"><input type="checkbox" name="autoSyncOnStart" ${state.settings.autoSyncOnStart ? 'checked' : ''}> เปิดแอพแล้วเชื่อมต่ออัตโนมัติ</label>
+          <label class="checkline"><input type="checkbox" name="liveSyncEnabled" ${state.settings.liveSyncEnabled ? 'checked' : ''}> อัปเดตระหว่างใช้งาน</label>
           <label class="checkline"><input type="checkbox" name="useIncrementalSync" ${state.settings.useIncrementalSync !== false ? 'checked' : ''}> โหลดเฉพาะข้อมูลใหม่</label>
-          <button class="btn primary" type="submit">บันทึก Admin Hub</button>
-        </form>
-        <div class="admin-share-panel">
-          <div><b>ลิงก์เชิญสมาชิก</b><p>สมาชิกเปิดลิงก์นี้แล้วระบบจะรับค่า Firebase/Drive อัตโนมัติ โดยไม่ต้องตั้งค่าเอง</p></div>
-          <button class="btn accent" data-action="copy-invite-link" ${inviteReady ? '' : 'disabled'}>คัดลอกลิงก์เชิญ</button>
+          <input type="hidden" name="driveManagedByAdmin" value="on" />
         </div>
-        <div class="grid two">
-          <button class="btn accent" data-action="connect-firebase">เชื่อมต่อข้อมูล</button>
-          <button class="btn" data-action="push-firebase">ส่งข้อมูลที่รออยู่</button>
-          <button class="btn accent" data-action="connect-drive">เชื่อมต่อพื้นที่รูป</button>
-          <button class="btn primary" data-action="publish-admin-drive">👑 แชร์ Hub ให้ทุกคน</button>
-          <button class="btn" data-action="create-drive-folder">สร้างโฟลเดอร์รูปทริป</button>
-          <button class="btn" data-action="sync-drive">อัปเดตพื้นที่รูป</button>
-          <button class="btn" data-action="full-sync">โหลดข้อมูลใหม่ทั้งหมด</button>
-          <button class="btn" data-action="upload-pending">ส่งรูป/ข้อมูลที่รออยู่</button>
-        </div>`;
+        <div class="action-row">
+          <button class="btn primary" type="submit">บันทึก Hub</button>
+          <button class="btn" type="button" data-action="copy-invite-link" ${inviteReady ? '' : 'disabled'}>คัดลอกลิงก์เชิญ</button>
+          <button class="btn" type="button" data-action="create-drive-folder">สร้างโฟลเดอร์รูป</button>
+          <button class="btn" type="button" data-action="publish-admin-drive">แชร์ Hub ให้ทุกคน</button>
+        </div>
+      </form>
+    </details>` : '';
 
-  const memberHubPanel = `
-        <div class="member-hub-card">
-          <span class="status-dot ${firebase.connected ? 'online' : ''}"></span>
-          <div>
-            <b>${firebase.connected ? 'เชื่อมต่อ Social Feed แล้ว' : 'กำลังรอเชื่อมต่อจาก Admin Hub'}</b>
-            <p>${state.settings.adminDriveOwner ? `พื้นที่รูปจัดการโดย ${escapeHtml(state.settings.adminDriveOwner)}` : 'สมาชิกไม่ต้องตั้งค่า Firebase/Drive เอง ถ้ายังไม่เชื่อมต่อให้เปิดลิงก์เชิญจาก Admin'}</p>
-          </div>
+  const tripSettings = isAdmin ? `
+    <details class="more-details">
+      <summary><span>🏕️ แก้ข้อมูลทริป</span><small>ชื่อทริป ปลายทาง แผนวันนี้</small></summary>
+      <form class="stack" data-form="trip">
+        <div class="grid two compact-form-grid">
+          <div class="field"><label>ชื่อทริป</label><input class="input" name="title" value="${escapeAttr(state.trip.title || '')}" /></div>
+          <div class="field"><label>ปลายทาง</label><input class="input" name="destination" value="${escapeAttr(state.trip.destination || '')}" /></div>
+          <div class="field"><label>ช่วง/วันนี้</label><input class="input" name="day" value="${escapeAttr(state.trip.day || '')}" /></div>
+          <div class="field"><label>Mood วันนี้</label><input class="input" name="mood" value="${escapeAttr(state.trip.mood || '')}" /></div>
+          <div class="field wide"><label>คำอธิบายทริป</label><input class="input" name="subtitle" value="${escapeAttr(state.trip.subtitle || '')}" /></div>
+          <div class="field wide"><label>แผนวันนี้ / สิ่งต่อไป</label><input class="input" name="nextPlan" value="${escapeAttr(state.trip.nextPlan || '')}" /></div>
         </div>
-        <div class="grid two">
-          <button class="btn accent" data-action="connect-firebase">เชื่อมต่อข้อมูลอีกครั้ง</button>
-          <button class="btn" data-action="upload-pending">ส่งโพสต์ที่รออยู่</button>
-        </div>`;
+        <button class="btn primary" type="submit">บันทึกข้อมูลทริป</button>
+      </form>
+    </details>` : `
+    <div class="more-info-card">
+      <span class="tag">${escapeHtml(state.trip.day || 'Trip Mode')}</span>
+      <h3>${escapeHtml(state.trip.title || 'ทริปของเรา')}</h3>
+      <p>${escapeHtml(state.trip.destination || 'ปลายทางของทริป')}</p>
+    </div>`;
 
   return `
-    <section class="grid two">
-      <div class="card pad stack">
-        ${tripPanel}
-        <div class="profile-card-preview compact">${currentAvatar('avatar')}<div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · ${state.settings.adminDriveOwner ? 'Hub โดย Admin: ' + escapeHtml(state.settings.adminDriveOwner) : 'พร้อมเที่ยว'}</p></div><button class="btn ghost" data-action="open-account">แก้บัญชี</button></div>
-        ${isAdmin ? adminHubPanel : memberHubPanel}
-      </div>
-
-      <div class="card pad stack">
-        <h3>👥 สมาชิกแก๊ง</h3>
-        ${isAdmin ? `<form class="grid two" data-form="member">
-          <div class="field"><label>ชื่อเล่น</label><input class="input" name="name" required placeholder="เช่น บอส" /></div>
-          <div class="field"><label>สาย</label><select class="select" name="role"><option>สายคอนเทนต์</option><option>สายฮา</option><option>สายกิน</option><option>สายหลับ</option><option>สายเปย์</option><option>สายไกด์</option></select></div>
-          <div class="field"><label>สี</label><input class="input" name="color" type="color" value="#0f6b5e" /></div>
-          <button class="btn primary" type="submit">เพิ่มสมาชิก</button>
-        </form>` : ''}
-        ${renderMembers()}
-      </div>
-    </section>
-
-    <section class="grid two" style="margin-top:16px">
-      <div class="card pad stack">
-        <h3>💸 หารค่าใช้จ่าย</h3>
-        <form class="grid two" data-form="expense">
-          <div class="field"><label>รายการ</label><input class="input" name="title" required placeholder="ค่าแพ / ค่าเรือ / ค่าอาหาร" /></div>
-          <div class="field"><label>จำนวนเงิน</label><input class="input" name="amount" required type="number" min="0" step="0.01" /></div>
-          <div class="field"><label>คนจ่าย</label>${memberSelect('payer', '')}</div>
-          <button class="btn primary" type="submit">เพิ่มรายการ</button>
-        </form>
-        <div class="spread"><b>รวมทั้งหมด</b><b>${money(total)}</b></div>
-        ${expenseList.slice(0, 20).map(e => `<div class="quest-card"><div class="spread"><b>${escapeHtml(e.title)} · ${money(e.amount)}</b>${canManageItem(e) ? `<button class="btn danger compact-btn" data-action="delete-expense" data-id="${escapeAttr(e.id)}">ลบ</button>` : ''}</div><p class="quest-desc">จ่ายโดย ${escapeHtml(e.payer || '-')} · คนละประมาณ ${money(activeList('members').length ? Number(e.amount || 0) / activeList('members').length : e.amount)}</p><p class="small muted">เพิ่มโดย ${escapeHtml(e.author || e.createdBy || 'แก๊งนี้')} · ${formatThaiDate(e.createdAt)}</p></div>`).join('') || '<div class="empty">ยังไม่มีค่าใช้จ่าย</div>'}
-      </div>
-
-      <div class="card pad stack">
-        <h3>✅ Checklist + Backup</h3>
-        ${PACKING_ITEMS.map((x, i) => `<label class="quest-card"><span><input type="checkbox" data-action="checklist" data-index="${i}" ${state.checklist?.items?.[i] ? 'checked' : ''}> ${escapeHtml(x)}</span></label>`).join('')}
-        <div class="grid two">
-          <button class="btn" data-action="export-state">Export Backup</button>
-          <label class="btn" for="importStateInput">Import Backup</label>
-          <input id="importStateInput" type="file" accept="application/json" hidden />
-          <button class="btn accent" data-action="install-app">ติดตั้งแอพ</button>
-          <button class="btn danger" data-action="reset-local">ล้างข้อมูล Local</button>
+    <section class="more-screen">
+      <div class="more-hero card">
+        <div class="more-profile-row">
+          ${currentAvatar('avatar big')}
+          <div>
+            <h2>${escapeHtml(currentUserName())}</h2>
+            <p>${currentUserBadge()} · ${escapeHtml(state.trip.title || 'Trip Memory App')}</p>
+          </div>
+          <button class="btn ghost" data-action="open-account">บัญชี</button>
         </div>
+        <div class="more-status-grid">
+          <span class="more-status ${firebase.connected ? 'ok' : ''}">● ${connectedText}</span>
+          <span class="more-status ${drive.connected ? 'ok' : ''}">● ${mediaText}</span>
+          <span class="more-status">⏳ Pending ${countPendingRecords()}</span>
+        </div>
+        <div class="more-main-actions">
+          <button class="btn accent full" data-action="auto-connect-hub">เชื่อมต่อและอัปเดตอัตโนมัติ</button>
+          <button class="btn full" data-action="upload-pending">ส่งโพสต์ที่รออยู่</button>
+        </div>
+      </div>
+
+      ${tripSettings}
+      ${adminHubDetails}
+
+      <div class="more-card-grid">
+        <details class="more-details" open>
+          <summary><span>👥 สมาชิก</span><small>${activeList('members').length} คน</small></summary>
+          ${isAdmin ? `<form class="grid two compact-form-grid" data-form="member">
+            <div class="field"><label>ชื่อเล่น</label><input class="input" name="name" required placeholder="เช่น บอส" /></div>
+            <div class="field"><label>สาย</label><select class="select" name="role"><option>สายคอนเทนต์</option><option>สายฮา</option><option>สายกิน</option><option>สายหลับ</option><option>สายเปย์</option><option>สายไกด์</option></select></div>
+            <div class="field"><label>สี</label><input class="input" name="color" type="color" value="#0f6b5e" /></div>
+            <button class="btn primary" type="submit">เพิ่มสมาชิก</button>
+          </form>` : ''}
+          ${renderMembers()}
+        </details>
+
+        <details class="more-details">
+          <summary><span>💸 ค่าใช้จ่าย</span><small>รวม ${money(total)}</small></summary>
+          <form class="grid two compact-form-grid" data-form="expense">
+            <div class="field"><label>รายการ</label><input class="input" name="title" required placeholder="ค่าแพ / ค่าเรือ / ค่าอาหาร" /></div>
+            <div class="field"><label>จำนวนเงิน</label><input class="input" name="amount" required type="number" min="0" step="0.01" /></div>
+            <div class="field"><label>คนจ่าย</label>${memberSelect('payer', '')}</div>
+            <button class="btn primary" type="submit">เพิ่มรายการ</button>
+          </form>
+          <div class="expense-list-compact">
+            ${expenseList.slice(0, 20).map(e => `<div class="expense-row"><div><b>${escapeHtml(e.title)}</b><small>${escapeHtml(e.payer || '-')} · ${formatThaiDate(e.createdAt)}</small></div><b>${money(e.amount)}</b>${canManageItem(e) ? `<button class="mini-link danger" data-action="delete-expense" data-id="${escapeAttr(e.id)}">ลบ</button>` : ''}</div>`).join('') || '<div class="empty">ยังไม่มีค่าใช้จ่าย</div>'}
+          </div>
+        </details>
+
+        <details class="more-details">
+          <summary><span>✅ Checklist</span><small>ของจำเป็น</small></summary>
+          <div class="checklist-compact">
+            ${PACKING_ITEMS.map((x, i) => `<label><input type="checkbox" data-action="checklist" data-index="${i}" ${state.checklist?.items?.[i] ? 'checked' : ''}> <span>${escapeHtml(x)}</span></label>`).join('')}
+          </div>
+        </details>
+
+        <details class="more-details">
+          <summary><span>🗂️ Backup & App</span><small>สำรอง / ติดตั้ง / ล้างเครื่องนี้</small></summary>
+          <div class="grid two compact-form-grid">
+            <button class="btn" data-action="export-state">Export Backup</button>
+            <label class="btn" for="importStateInput">Import Backup</label>
+            <input id="importStateInput" type="file" accept="application/json" hidden />
+            <button class="btn accent" data-action="install-app">ติดตั้งแอพ</button>
+            <button class="btn danger" data-action="reset-local">ล้างข้อมูล Local</button>
+          </div>
+        </details>
       </div>
     </section>
   `;
@@ -1683,6 +1744,10 @@ async function onClick(event) {
     if (action === 'toggle-feature') return toggleFeaturedMoment(btn.dataset.id);
     if (action === 'download-media') return downloadMomentMedia(btn.dataset.momentId, Number(btn.dataset.mediaIndex || 0));
     if (action === 'download-album') return downloadMomentAlbum(btn.dataset.id);
+    if (action === 'retry-upload-moment') return retryUploadMoment(btn.dataset.id);
+    if (action === 'auto-connect-hub') return autoConnectHub();
+    if (action === 'focus-comment') return focusCommentInput(btn.dataset.id);
+    if (action === 'toggle-comments') return toggleCommentsView(btn.dataset.id);
     if (action === 'connect-firebase') return connectFirebase();
     if (action === 'push-firebase') return uploadPendingSocialRecords();
     if (action === 'connect-drive') return connectDrive();
@@ -1919,8 +1984,17 @@ async function addMember(data, form) {
 }
 
 async function addMoment(data, form) {
+  const submitBtn = form.querySelector('button[type="submit"]');
+  const originalLabel = submitBtn?.textContent || '';
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'กำลังเตรียมโพสต์…';
+  }
+  uploadUi = { active: true, tone: 'info', text: 'กำลังเก็บไฟล์ต้นฉบับไว้ในเครื่องก่อนอัปโหลด…' };
+
   const files = data.getAll('media').filter(file => file && file.size);
   const author = String(data.get('author') || state.profile.name || 'แก๊งนี้').trim();
+  const now = new Date().toISOString();
   let moment = {
     id: uid('moment'),
     type: data.get('type') || 'moment',
@@ -1932,51 +2006,109 @@ async function addMoment(data, form) {
     caption: String(data.get('caption') || '').trim(),
     place: String(data.get('place') || '').trim(),
     mood: data.get('mood') || 'ตำนาน',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: now,
+    updatedAt: now,
     media: [],
     gps: data.get('gpsLat') ? {
       lat: Number(data.get('gpsLat')),
       lng: Number(data.get('gpsLng')),
       accuracy: Number(data.get('gpsAccuracy') || 0),
-      capturedAt: composer.gps?.capturedAt || new Date().toISOString()
+      capturedAt: composer.gps?.capturedAt || now
     } : null,
+    uploadState: files.length ? 'pending' : 'local',
+    uploadMessage: files.length ? 'บันทึกไฟล์ต้นฉบับไว้แล้ว กำลังส่งขึ้น Hub' : 'โพสต์ข้อความ',
     storage: 'local'
   };
 
-  for (const file of files) {
-    const blobId = mediaId('fullres');
-    await saveMediaBlob(blobId, file, {
-      name: file.name,
-      mimeType: file.type || 'application/octet-stream',
-      size: file.size,
-      lastModified: file.lastModified
-    });
-    moment.media.push({
-      id: blobId,
-      localBlobId: blobId,
-      name: file.name,
-      mimeType: file.type || 'application/octet-stream',
-      size: file.size,
-      lastModified: file.lastModified,
-      fullResolution: true,
-      pendingUpload: true
-    });
-  }
+  try {
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      uploadUi = { active: true, tone: 'info', text: `กำลังเตรียมไฟล์ ${index + 1}/${files.length}: ${file.name}` };
+      const blobId = mediaId('fullres');
+      await saveMediaBlob(blobId, file, {
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        size: file.size,
+        lastModified: file.lastModified
+      });
+      moment.media.push({
+        id: blobId,
+        localBlobId: blobId,
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        size: file.size,
+        lastModified: file.lastModified,
+        fullResolution: true,
+        pendingUpload: true
+      });
+    }
 
-  state.moments.push(moment);
-  await uploadMomentRecordIfConnected(moment);
-  if (moment.type === 'quote') {
-    const quote = { id: uid('quote'), text: moment.caption, author, accountId: currentAccountId(), createdBy: author, createdById: currentAccountId(), sourceMomentId: moment.id, createdAt: moment.createdAt, updatedAt: moment.updatedAt, storage: moment.storage };
-    state.quotes.push(quote);
-    await uploadRecordIfConnected('quotes', quote);
+    state.moments.push(moment);
+    persist();
+    form.reset();
+    closeComposer();
+    toast(files.length ? 'สร้างโพสต์แล้ว กำลังอัปโหลดไฟล์เต็มความละเอียด' : 'แชร์โพสต์แล้ว');
+
+    if (moment.type === 'quote') {
+      const quote = { id: uid('quote'), text: moment.caption, author, accountId: currentAccountId(), createdBy: author, createdById: currentAccountId(), sourceMomentId: moment.id, createdAt: moment.createdAt, updatedAt: moment.updatedAt, storage: moment.storage };
+      state.quotes.push(quote);
+      await uploadRecordIfConnected('quotes', quote);
+    }
+
+    moment.uploadState = files.length ? 'uploading' : 'syncing';
+    moment.uploadMessage = files.length ? 'กำลังส่งไฟล์เต็มความละเอียดขึ้น Google Drive' : 'กำลังส่งข้อมูลโพสต์';
+    uploadUi = { active: true, tone: 'info', text: moment.uploadMessage };
+    persist();
+    render();
+
+    const ok = await uploadMomentRecordIfConnected(moment);
+    moment.uploadState = ok ? 'synced' : (files.length ? 'pending' : 'local');
+    moment.uploadMessage = ok ? 'ซิงก์สำเร็จ' : 'ยังรอส่งขึ้น Hub';
+    moment.updatedAt = new Date().toISOString();
+    uploadUi = ok ? { active: false, text: '', tone: 'success' } : { active: false, text: '', tone: 'warning' };
+    persist();
+    toast(ok ? 'โพสต์ขึ้น Hub แล้ว' : 'บันทึกไว้ในเครื่องแล้ว รอเชื่อมต่อเพื่ออัปโหลด');
+    render();
+  } catch (error) {
+    console.error(error);
+    moment.uploadState = 'error';
+    moment.uploadMessage = error.message || 'อัปโหลดไม่สำเร็จ';
+    uploadUi = { active: false, text: '', tone: 'error' };
+    persist();
+    toast(error.message || 'อัปโหลดไม่สำเร็จ');
+    render();
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalLabel;
+    }
   }
+}
+
+async function retryUploadMoment(id) {
+  const moment = state.moments.find(item => item.id === id && !item.deleted);
+  if (!moment) return toast('ไม่พบโพสต์นี้');
+  moment.uploadState = 'uploading';
+  moment.uploadMessage = 'กำลังอัปโหลดซ้ำ…';
+  uploadUi = { active: true, tone: 'info', text: 'กำลังส่งโพสต์และไฟล์ขึ้น Hub…' };
   persist();
-  form.reset();
-  closeComposer();
-  const fileText = files.length ? ` พร้อมไฟล์เต็มความละเอียด ${files.length} ไฟล์` : '';
-  const hubText = moment.storage === 'firebase' ? 'Firebase Feed' : moment.storage === 'drive' ? 'Drive Hub' : 'เครื่องนี้';
-  toast(`แชร์ลง ${hubText} แล้ว${fileText}`);
+  render();
+  try {
+    const ok = await uploadMomentRecordIfConnected(moment);
+    moment.uploadState = ok ? 'synced' : 'pending';
+    moment.uploadMessage = ok ? 'ซิงก์สำเร็จ' : 'ยังรอเชื่อมต่อ Hub';
+    moment.updatedAt = new Date().toISOString();
+    uploadUi = { active: false, text: '', tone: ok ? 'success' : 'warning' };
+    persist();
+    toast(ok ? 'อัปโหลดสำเร็จ' : 'ยังอัปโหลดไม่ได้ ตรวจการเชื่อมต่อ Hub');
+  } catch (error) {
+    console.error(error);
+    moment.uploadState = 'error';
+    moment.uploadMessage = error.message || 'อัปโหลดไม่สำเร็จ';
+    uploadUi = { active: false, text: '', tone: 'error' };
+    persist();
+    toast(error.message || 'อัปโหลดไม่สำเร็จ');
+  }
   render();
 }
 
@@ -2447,6 +2579,51 @@ async function reactToMoment(momentId, emoji) {
 
 
 
+
+async function autoConnectHub() {
+  syncStatus = { text: 'กำลังเชื่อมต่อระบบอัตโนมัติ…', tone: 'info' };
+  renderSyncStatusOnly();
+  let ok = 0;
+  try {
+    if (state.settings.firebaseEnabled && state.settings.firebaseApiKey && state.settings.firebaseProjectId && state.settings.firebaseAppId) {
+      await connectFirebase();
+      ok += 1;
+    }
+  } catch (error) {
+    console.warn('Auto Firebase connect failed:', error);
+    state.settings.lastFirebaseError = error.message || String(error);
+  }
+  try {
+    if (state.settings.driveClientId && state.settings.driveRootFolderId) {
+      await connectDrive();
+      ok += 1;
+    }
+  } catch (error) {
+    console.warn('Auto Drive connect failed:', error);
+    state.settings.lastDriveError = error.message || String(error);
+  }
+  try {
+    if (firebase.connected) await uploadPendingSocialRecords({ silent: true });
+    if (drive.connected) await uploadPendingMoments({ silent: true });
+  } catch (error) {
+    console.warn('Auto pending upload failed:', error);
+  }
+  syncStatus = ok ? { text: 'เชื่อมต่อและอัปเดตแล้ว', tone: 'success' } : { text: 'ยังเชื่อมต่อไม่ได้ ตรวจค่า Admin Hub หรือเปิดลิงก์เชิญใหม่', tone: 'error' };
+  persist();
+  toast(ok ? 'เชื่อมต่อและอัปเดตแล้ว' : 'ยังเชื่อมต่อไม่ได้');
+  render();
+}
+
+function focusCommentInput(momentId) {
+  const form = Array.from(document.querySelectorAll('form[data-form="comment"]')).find(item => item.dataset.momentId === momentId);
+  const input = form?.querySelector('input');
+  if (input) input.focus({ preventScroll: false });
+}
+
+function toggleCommentsView(momentId) {
+  focusCommentInput(momentId);
+}
+
 async function connectFirebase() {
   await firebase.connect({ listen: true });
   state.settings.firebaseEnabled = true;
@@ -2644,6 +2821,7 @@ async function uploadRecordIfConnected(collection, item, options = {}) {
 }
 
 async function uploadMomentRecordIfConnected(moment) {
+  moment.uploadState ||= (moment.media || []).length ? 'pending' : 'local';
   try {
     if ((moment.media || []).length && drive.connected && state.settings.driveRootFolderId) {
       const result = await uploadMomentWithStoredMedia(moment, { skipDriveRecord: state.settings.firebaseEnabled && firebase.connected });
@@ -2654,13 +2832,15 @@ async function uploadMomentRecordIfConnected(moment) {
     if (state.settings.firebaseEnabled && firebase.connected && !hasPendingMedia) {
       await firebase.uploadRecord('moments', moment);
       moment.storage = 'firebase';
+      moment.uploadState = 'synced';
+      moment.uploadMessage = 'ซิงก์สำเร็จ';
       persist();
       return true;
     }
 
     if (drive.connected && state.settings.driveRootFolderId) {
       const result = (moment.media || []).length ? await uploadMomentWithStoredMedia(moment) : (await drive.uploadMoment(moment)).moment;
-      Object.assign(moment, result, { storage: 'drive' });
+      Object.assign(moment, result, { storage: 'drive', uploadState: 'synced', uploadMessage: 'ซิงก์สำเร็จ' });
       persist();
       return true;
     }
@@ -2668,6 +2848,10 @@ async function uploadMomentRecordIfConnected(moment) {
     console.warn('Moment upload pending kept local', moment, error);
   }
   moment.storage = 'local';
+  if ((moment.media || []).some(media => media.pendingUpload || (!media.driveFileId && media.localBlobId))) {
+    moment.uploadState = moment.uploadState === 'uploading' ? 'pending' : (moment.uploadState || 'pending');
+    moment.uploadMessage = 'รอเชื่อมต่อ Hub เพื่อส่งไฟล์เต็ม';
+  }
   return false;
 }
 
