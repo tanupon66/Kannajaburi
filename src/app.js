@@ -4,6 +4,8 @@ import {
   exportState,
   importState,
   dataUrlToBlob,
+  fileToOptimizedDataUrl,
+  fileToDataUrl,
   formatThaiDate,
   initials,
   scoreFromState,
@@ -21,6 +23,7 @@ let currentPage = 'home';
 let deferredInstallPrompt = null;
 let currentGameDeck = 'most';
 let reel = { open: false, index: 0, timer: null };
+let storyViewer = { open: false, id: '', index: 0, timer: null };
 let composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '', gps: null };
 let syncTimer = null;
 let isSyncing = false;
@@ -70,6 +73,9 @@ function saveAccountSession(account = {}) {
       username: account.username || '',
       role: account.role || 'สายคอนเทนต์',
       color: account.color || '#0f6b5e',
+      avatarDataUrl: account.avatarDataUrl || '',
+      avatarMimeType: account.avatarMimeType || '',
+      avatarName: account.avatarName || '',
       isAdmin: Boolean(account.isAdmin),
       savedAt: new Date().toISOString()
     };
@@ -131,6 +137,9 @@ function applyAccountToProfile(account) {
   state.profile.username = account.username || '';
   state.profile.role = account.role || 'สายคอนเทนต์';
   state.profile.color = account.color || '#0f6b5e';
+  state.profile.avatarDataUrl = account.avatarDataUrl || '';
+  state.profile.avatarMimeType = account.avatarMimeType || '';
+  state.profile.avatarName = account.avatarName || '';
   state.profile.isAdmin = Boolean(account.isAdmin);
   state.profile.createdAt ||= account.createdAt || new Date().toISOString();
   saveAccountSession(account);
@@ -147,6 +156,9 @@ function ensureMemberForAccount(account) {
     name: account.name || account.username || 'เพื่อน',
     role: account.role || 'สายคอนเทนต์',
     color: account.color || '#0f6b5e',
+    avatarDataUrl: account.avatarDataUrl || '',
+    avatarMimeType: account.avatarMimeType || '',
+    avatarName: account.avatarName || '',
     isAdmin: Boolean(account.isAdmin),
     createdAt: account.createdAt || now,
     updatedAt: now,
@@ -196,7 +208,7 @@ async function verifyAccountPassword(account, password) {
 function logoutAccount() {
   state.auth ||= {};
   state.auth.activeAccountId = '';
-  state.profile = { accountId: '', name: '', role: 'สายคอนเทนต์', color: '#0f6b5e', isAdmin: false, pinHint: '', createdAt: '' };
+  state.profile = { accountId: '', name: '', role: 'สายคอนเทนต์', color: '#0f6b5e', avatarDataUrl: '', avatarMimeType: '', avatarName: '', isAdmin: false, pinHint: '', createdAt: '' };
   clearAccountSession();
   persist();
   toast('ออกจากระบบแล้ว');
@@ -218,6 +230,9 @@ function restoreProfileFromSession() {
     state.profile.username = source.username || state.profile.username || '';
     state.profile.role = source.role || state.profile.role || 'สายคอนเทนต์';
     state.profile.color = source.color || state.profile.color || '#0f6b5e';
+    state.profile.avatarDataUrl = source.avatarDataUrl || state.profile.avatarDataUrl || '';
+    state.profile.avatarMimeType = source.avatarMimeType || state.profile.avatarMimeType || '';
+    state.profile.avatarName = source.avatarName || state.profile.avatarName || '';
     state.profile.isAdmin = Boolean(source.isAdmin);
     state.profile.createdAt ||= source.createdAt || session?.savedAt || new Date().toISOString();
     saveAccountSession({ ...source, id: accountId, accountId });
@@ -247,6 +262,45 @@ function currentUserBadge() {
   return (state.profile.isAdmin || account?.isAdmin) ? '👑 Admin' : '🙋 Member';
 }
 
+function isAdminAccount() {
+  const account = activeAccount();
+  return Boolean(state.profile.isAdmin || account?.isAdmin);
+}
+
+function requireAdmin(message = 'เฉพาะ Admin เท่านั้นที่จัดการส่วนนี้ได้') {
+  if (isAdminAccount()) return true;
+  toast(message);
+  return false;
+}
+
+function accountForDisplay({ accountId = '', name = '' } = {}) {
+  if (accountId) {
+    const acc = findAccountById(accountId);
+    if (acc) return acc;
+    const member = (state.members || []).find(m => isActiveItem(m) && (m.accountId === accountId || m.id === accountId));
+    if (member) return member;
+  }
+  if (name) {
+    const member = (state.members || []).find(m => isActiveItem(m) && m.name === name);
+    if (member) return member;
+    const acc = (state.accounts || []).find(a => isActiveItem(a) && (a.name === name || a.username === normalizeUsername(name)));
+    if (acc) return acc;
+  }
+  return null;
+}
+
+function renderAvatar({ accountId = '', name = '', color = '', className = 'avatar', fallback = '?' } = {}) {
+  const person = accountForDisplay({ accountId, name }) || {};
+  const display = name || person.name || person.username || fallback;
+  const bg = color || person.color || '#0f6b5e';
+  const avatar = person.avatarDataUrl || (person.id === state.profile.accountId ? state.profile.avatarDataUrl : '') || '';
+  return `<span class="${escapeAttr(className)}" style="background:${escapeAttr(bg)}">${avatar ? `<img src="${escapeAttr(avatar)}" alt="${escapeAttr(display)}" />` : escapeHtml(initials(display))}</span>`;
+}
+
+function currentAvatar(className = 'avatar') {
+  return renderAvatar({ accountId: currentAccountId(), name: currentUserName(), color: state.profile.color, className });
+}
+
 function isActiveItem(item) {
   return item && item.deleted !== true;
 }
@@ -266,7 +320,7 @@ function canManageItem(item = {}) {
   const accountId = currentAccountId();
   const name = currentUserName();
   return Boolean(
-    state.profile.isAdmin ||
+    isAdminAccount() ||
     item.accountId === accountId ||
     item.authorId === accountId ||
     item.createdById === accountId ||
@@ -303,6 +357,9 @@ function ensureProfileAccount() {
       name: state.profile.name || username,
       role: state.profile.role || 'สายคอนเทนต์',
       color: state.profile.color || '#0f6b5e',
+      avatarDataUrl: state.profile.avatarDataUrl || '',
+      avatarMimeType: state.profile.avatarMimeType || '',
+      avatarName: state.profile.avatarName || '',
       isAdmin: Boolean(state.profile.isAdmin),
       createdAt: state.profile.createdAt || now,
       updatedAt: now,
@@ -317,6 +374,9 @@ function ensureProfileAccount() {
       name: state.profile.name || account.name,
       role: state.profile.role || account.role || 'สายคอนเทนต์',
       color: state.profile.color || account.color || '#0f6b5e',
+      avatarDataUrl: state.profile.avatarDataUrl || account.avatarDataUrl || '',
+      avatarMimeType: state.profile.avatarMimeType || account.avatarMimeType || '',
+      avatarName: state.profile.avatarName || account.avatarName || '',
       isAdmin: Boolean(state.profile.isAdmin),
       updatedAt: now,
       storage: account.storage === 'firebase' ? 'local' : account.storage || 'local'
@@ -336,20 +396,34 @@ function activeReactionFor(momentId) {
 function applyAdminDriveSettings(record) {
   if (!record) return false;
   let changed = false;
-  if (record.driveClientId && record.driveClientId !== state.settings.driveClientId) { state.settings.driveClientId = record.driveClientId; changed = true; }
-  if (record.driveRootFolderId && record.driveRootFolderId !== state.settings.driveRootFolderId) { state.settings.driveRootFolderId = record.driveRootFolderId; changed = true; }
-  if (record.driveRootFolderName && record.driveRootFolderName !== state.settings.driveRootFolderName) { state.settings.driveRootFolderName = record.driveRootFolderName; changed = true; }
+  const directFields = [
+    'driveClientId', 'driveRootFolderId', 'driveRootFolderName',
+    'firebaseTripId', 'firebaseApiKey', 'firebaseAuthDomain', 'firebaseProjectId',
+    'firebaseStorageBucket', 'firebaseMessagingSenderId', 'firebaseAppId'
+  ];
+  for (const key of directFields) {
+    if (record[key] !== undefined && record[key] !== '' && state.settings[key] !== record[key]) {
+      state.settings[key] = record[key];
+      changed = true;
+    }
+  }
+  if (record.firebaseEnabled !== undefined && state.settings.firebaseEnabled !== Boolean(record.firebaseEnabled)) {
+    state.settings.firebaseEnabled = Boolean(record.firebaseEnabled);
+    changed = true;
+  }
+  if (record.driveManagedByAdmin !== undefined) state.settings.driveManagedByAdmin = Boolean(record.driveManagedByAdmin);
   if (record.adminDriveOwner) state.settings.adminDriveOwner = record.adminDriveOwner;
   if (record.updatedAt) state.settings.adminDriveSharedAt = record.updatedAt;
   if (changed) {
     state.settings.driveChildren = {};
     state.settings.collectionSyncAt = {};
+    state.settings.syncMode = state.settings.firebaseEnabled ? 'firebase-first' : 'drive-first';
   }
   return changed;
 }
 
 async function publishAdminDriveSettings() {
-  if (!state.profile.isAdmin) return toast('เฉพาะ Admin เท่านั้นที่เผยแพร่ Drive Hub ให้เพื่อนได้');
+  if (!requireAdmin('เฉพาะ Admin เท่านั้นที่เผยแพร่ Hub ให้สมาชิกได้')) return;
   if (!state.settings.driveClientId || !state.settings.driveRootFolderId) return toast('ใส่ Google OAuth Client ID และ Drive Folder ID ก่อน');
   const now = new Date().toISOString();
   const record = {
@@ -357,6 +431,15 @@ async function publishAdminDriveSettings() {
     driveClientId: state.settings.driveClientId,
     driveRootFolderId: state.settings.driveRootFolderId,
     driveRootFolderName: state.settings.driveRootFolderName,
+    firebaseEnabled: Boolean(state.settings.firebaseEnabled),
+    firebaseTripId: state.settings.firebaseTripId || 'kannajaburi-trip',
+    firebaseApiKey: state.settings.firebaseApiKey || '',
+    firebaseAuthDomain: state.settings.firebaseAuthDomain || '',
+    firebaseProjectId: state.settings.firebaseProjectId || '',
+    firebaseStorageBucket: state.settings.firebaseStorageBucket || '',
+    firebaseMessagingSenderId: state.settings.firebaseMessagingSenderId || '',
+    firebaseAppId: state.settings.firebaseAppId || '',
+    driveManagedByAdmin: true,
     adminDriveOwner: currentUserName(),
     createdAt: state.settings.adminDriveSharedAt || now,
     updatedAt: now,
@@ -370,8 +453,100 @@ async function publishAdminDriveSettings() {
   state.settings.adminDriveSharedAt = now;
   persist();
   await uploadRecordIfConnected('tripSettings', record);
-  toast('เผยแพร่ Drive Hub ของ Admin ให้ทุกบัญชีแล้ว');
+  toast('เผยแพร่ Firebase + Drive Hub ให้สมาชิกแล้ว');
   render();
+}
+
+
+function invitePayload() {
+  return {
+    v: 1,
+    app: 'kannajaburi-trip',
+    firebaseEnabled: Boolean(state.settings.firebaseEnabled),
+    firebaseTripId: state.settings.firebaseTripId || 'kannajaburi-trip',
+    firebaseApiKey: state.settings.firebaseApiKey || '',
+    firebaseAuthDomain: state.settings.firebaseAuthDomain || '',
+    firebaseProjectId: state.settings.firebaseProjectId || '',
+    firebaseStorageBucket: state.settings.firebaseStorageBucket || '',
+    firebaseMessagingSenderId: state.settings.firebaseMessagingSenderId || '',
+    firebaseAppId: state.settings.firebaseAppId || '',
+    driveClientId: state.settings.driveClientId || '',
+    driveRootFolderId: state.settings.driveRootFolderId || '',
+    driveRootFolderName: state.settings.driveRootFolderName || 'กาญนะจ๊ะบุรีทริป - Shared Memories',
+    tripTitle: state.trip?.title || 'กาญนะจ๊ะบุรีทริป',
+    destination: state.trip?.destination || '',
+    createdAt: new Date().toISOString()
+  };
+}
+
+function encodeInvite(data) {
+  try {
+    const json = JSON.stringify(data);
+    const b64 = btoa(unescape(encodeURIComponent(json)));
+    return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  } catch (error) {
+    console.warn('Cannot encode invite:', error);
+    return '';
+  }
+}
+
+function decodeInvite(code = '') {
+  try {
+    const normalized = String(code).replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+    return JSON.parse(decodeURIComponent(escape(atob(padded))));
+  } catch (error) {
+    console.warn('Cannot decode invite:', error);
+    return null;
+  }
+}
+
+function buildInviteLink() {
+  const code = encodeInvite(invitePayload());
+  const base = `${location.origin}${location.pathname}`;
+  return code ? `${base}?invite=${code}` : base;
+}
+
+function applyInviteFromUrl() {
+  const searchParams = new URLSearchParams(location.search || '');
+  const hashValue = (location.hash || '').replace(/^#/, '');
+  const hashParams = new URLSearchParams(hashValue.includes('=') ? hashValue : '');
+  const code = searchParams.get('invite') || hashParams.get('invite') || '';
+  if (!code) return false;
+  const data = decodeInvite(code);
+  if (!data || data.app !== 'kannajaburi-trip') return false;
+  const fields = [
+    'firebaseEnabled', 'firebaseTripId', 'firebaseApiKey', 'firebaseAuthDomain', 'firebaseProjectId',
+    'firebaseStorageBucket', 'firebaseMessagingSenderId', 'firebaseAppId', 'driveClientId',
+    'driveRootFolderId', 'driveRootFolderName'
+  ];
+  for (const key of fields) {
+    if (data[key] !== undefined && data[key] !== '') state.settings[key] = data[key];
+  }
+  state.settings.driveManagedByAdmin = true;
+  state.settings.autoSyncOnStart = true;
+  state.settings.liveSyncEnabled = true;
+  state.settings.syncMode = state.settings.firebaseEnabled ? 'firebase-first' : 'drive-first';
+  if (data.tripTitle) state.trip.title = data.tripTitle;
+  if (data.destination) state.trip.destination = data.destination;
+  persist();
+  try { window.history.replaceState({}, document.title, `${location.origin}${location.pathname}`); } catch (error) { console.warn(error); }
+  syncStatus = { text: 'รับลิงก์เชิญจาก Admin แล้ว กำลังเชื่อมต่ออัตโนมัติ…', tone: 'success' };
+  return true;
+}
+
+async function copyAdminInviteLink() {
+  if (!requireAdmin('เฉพาะ Admin เท่านั้นที่สร้างลิงก์เชิญได้')) return;
+  if (!state.settings.firebaseEnabled || !state.settings.firebaseProjectId || !state.settings.firebaseApiKey || !state.settings.firebaseAppId) {
+    return toast('ตั้งค่า Firebase ให้ครบก่อนสร้างลิงก์เชิญสมาชิก');
+  }
+  const link = buildInviteLink();
+  try {
+    await navigator.clipboard.writeText(link);
+    toast('คัดลอกลิงก์เชิญสมาชิกแล้ว');
+  } catch (error) {
+    prompt('คัดลอกลิงก์นี้ให้สมาชิก', link);
+  }
 }
 
 const NAV = [
@@ -477,6 +652,7 @@ function init() {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && drive.connected && state.settings.liveSyncEnabled) syncDrive({ silent: true }).catch(console.warn);
   });
+  applyInviteFromUrl();
   restoreProfileFromSession();
   state.accountModalOpen = false;
   render();
@@ -611,6 +787,7 @@ function render() {
       <nav class="mobile-nav">${renderMobileNav()}</nav>
     </div>
     ${reel.open ? renderReel() : ''}
+    ${storyViewer.open ? renderStoryViewer() : ''}
     ${composer.open ? renderComposerModal() : ''}
     ${state.accountModalOpen ? renderAccountModal() : ''}
   `;
@@ -669,7 +846,7 @@ function renderMobileNav() {
 
 function pageTitle(page) {
   return {
-    home: { icon: '🏕️', name: 'วันนี้ทำไรดี', desc: 'แดชบอร์ดทริป ภารกิจ คะแนน และปุ่มเริ่มตำนาน' },
+    home: { icon: '🏕️', name: 'Trip Home', desc: 'ภาพรวมทริป แผนวันนี้ เช็กอิน สตอรี่ และความทรงจำล่าสุด' },
     feed: { icon: '📸', name: 'Memory Feed', desc: 'โพสต์รูป เช็กอิน คอมเมนต์ และแชร์โมเมนต์ร่วมกัน' },
     quest: { icon: '🧭', name: 'ภารกิจแก๊ง', desc: 'ทำเควสต์ ถ่ายคอนเทนต์ เล่นน้ำแบบปลอดภัย และเก็บ XP' },
     games: { icon: '🎲', name: 'เกมบนแพ', desc: 'Most Likely, Truth or Mission, Trip Bingo, Secret Buddy และ Caption Battle' },
@@ -691,31 +868,55 @@ function renderHome() {
   const done = Object.keys(state.questsDone || {}).length;
   const moments = activeList('moments').length;
   const score = scoreFromState(state);
-  const topQuests = QUESTS.filter(q => !state.questsDone[q.id]).slice(0, 4);
+  const topQuests = QUESTS.filter(q => !state.questsDone[q.id]).slice(0, 3);
+  const latest = activeList('moments').sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).slice(0, 3);
+  const destination = state.trip.destination || 'ทริปของเรา';
   return `
-    <section class="grid">
-      <div class="hero">
-        <div class="hero-content">
-          <div class="tag">${escapeHtml(state.trip.day)}</div>
-          <h2>${escapeHtml(state.trip.mood)}</h2>
-          <p>เปิดแอพนี้เหมือนสมุดเก็บความทรงจำของแก๊ง ทุกคนเพิ่มโมเมนต์ เช็กอิน เล่นเกม โหวตเพื่อน และจบด้วย Reel รวมทริปได้ในที่เดียว</p>
+    <section class="app-home">
+      <div class="trip-hero card">
+        <div class="trip-hero-bg"></div>
+        <div class="trip-hero-content">
+          <div class="trip-kicker">${escapeHtml(destination)}</div>
+          <h2>${escapeHtml(state.trip.title || state.appName || 'Trip Memory')}</h2>
+          <p>${escapeHtml(state.trip.subtitle || 'แชร์รูป เช็กอิน เล่นเกม และเก็บความทรงจำร่วมกัน')}</p>
           <div class="hero-stats">
-            <span class="stat-chip">🧭 เควสต์ ${done}/${QUESTS.length}</span>
-            <span class="stat-chip">📸 โมเมนต์ ${moments}</span>
+            <span class="stat-chip">📅 ${escapeHtml(state.trip.day || 'วันนี้')}</span>
+            <span class="stat-chip">✨ ${escapeHtml(state.trip.mood || 'พร้อมสร้างโมเมนต์')}</span>
             <span class="stat-chip">🔥 XP ${score}</span>
           </div>
           <div class="action-row">
-            <button class="btn accent" data-action="random-quest">สุ่มภารกิจ</button>
-            <button class="btn" data-action="start-game">เริ่มเกมกลุ่ม</button>
-            <button class="btn" data-action="open-reel">เปิด Memory Reel</button>
+            <button class="btn accent" data-action="open-composer">＋ เพิ่มโมเมนต์</button>
+            <button class="btn primary" data-action="quick-story">◎ เพิ่ม Story</button>
+            <button class="btn" data-action="open-reel">▶️ Memory Reel</button>
           </div>
         </div>
       </div>
 
-      <div class="grid three">
-        <div class="card kpi"><b>${activeList('members').length}</b><span>สมาชิกแก๊ง</span></div>
-        <div class="card kpi"><b>${moments}</b><span>โมเมนต์ในสมุด</span></div>
-        <div class="card kpi"><b>${score}</b><span>คะแนนรวมทริป</span></div>
+      <div class="grid four home-kpis">
+        <div class="card kpi"><b>${activeList('members').length}</b><span>สมาชิก</span></div>
+        <div class="card kpi"><b>${moments}</b><span>โพสต์</span></div>
+        <div class="card kpi"><b>${done}/${QUESTS.length}</b><span>Quest</span></div>
+        <div class="card kpi"><b>${activeList('votes').length}</b><span>Vote</span></div>
+      </div>
+
+      <div class="grid two">
+        <div class="card pad stack trip-plan-card">
+          <div class="spread"><h3>แผนวันนี้</h3><button class="btn ghost" data-nav="tools">แก้แผน</button></div>
+          <div class="timeline-card">
+            <span>📍</span>
+            <div><b>${escapeHtml(state.trip.day || 'ระบุช่วงทริป')}</b><p>${escapeHtml(state.trip.nextPlan || 'เพิ่มแผนวันนี้ เช่น จุดนัดพบ / เช็กอิน / เกมตอนกลางคืน')}</p></div>
+          </div>
+          <div class="quick-grid">
+            <button class="quick-tile" data-action="quick-checkin">📍<b>เช็กอิน</b><span>บันทึกสถานที่ + GPS</span></button>
+            <button class="quick-tile" data-action="quick-story">◎<b>Story</b><span>แชร์โมเมนต์สั้น ๆ</span></button>
+            <button class="quick-tile" data-action="start-game">🎲<b>Games</b><span>เล่นกับเพื่อน</span></button>
+            <button class="quick-tile" data-action="random-quest">🧭<b>Quest</b><span>สุ่มภารกิจ</span></button>
+          </div>
+        </div>
+        <div class="card pad stack">
+          <div class="spread"><h3>โมเมนต์ล่าสุด</h3><button class="btn ghost" data-nav="feed">ไป Feed</button></div>
+          ${latest.map(m => `<div class="mini-moment"><div>${renderStoryThumb(m)}</div><span><b>${escapeHtml(m.caption || m.place || 'โมเมนต์ใหม่')}</b><small>${escapeHtml(m.author || 'เพื่อน')} · ${formatThaiDate(m.createdAt)}</small></span></div>`).join('') || '<div class="empty">ยังไม่มีโมเมนต์ เริ่มโพสต์แรกของทริปได้เลย</div>'}
+        </div>
       </div>
 
       <div class="grid two">
@@ -724,12 +925,8 @@ function renderHome() {
           ${topQuests.map(renderQuestCard).join('') || '<div class="empty">ทำเควสต์ครบแล้ว เก่งมาก 🎉</div>'}
         </div>
         <div class="card pad stack">
-          <div class="spread"><h3>สมาชิก</h3><button class="btn ghost" data-action="open-member-modal">เพิ่มสมาชิก</button></div>
+          <div class="spread"><h3>สมาชิกทริป</h3><button class="btn ghost" data-nav="tools">จัดการ</button></div>
           ${renderMembers()}
-          <div class="stack">
-            <h3>Safety Reminder</h3>
-            ${SAFE_REMINDERS.map(x => `<div class="tag">⚠️ ${escapeHtml(x)}</div>`).join('')}
-          </div>
         </div>
       </div>
     </section>
@@ -741,7 +938,7 @@ function renderMembers() {
   if (!members.length) return '<div class="empty">ยังไม่มีสมาชิก เพิ่มชื่อเพื่อนก่อนเริ่มเล่นเกม</div>';
   return `<div class="member-list">${members.map(m => `
     <span class="member-chip">
-      <span class="avatar" style="background:${escapeAttr(m.color || '#0f6b5e')}">${escapeHtml(initials(m.name))}</span>
+      ${renderAvatar({ accountId: m.accountId || m.id, name: m.name, color: m.color })}
       <span>${escapeHtml(m.name)}</span>
       ${canManageItem(m) ? `<button class="mini-link danger" data-action="delete-member" data-id="${escapeAttr(m.id)}">ลบ</button>` : ''}
     </span>
@@ -749,16 +946,19 @@ function renderMembers() {
 }
 
 function renderFeed() {
-  const sorted = activeList('moments').sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  const stories = sorted.filter(m => (m.media || []).length).slice(0, 10);
+  const sorted = activeList('moments').sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  const storyMoments = sorted.filter(m => (m.type === 'story' || m.story === true || m.source === 'story') && (m.media || []).length);
+  const recentStoryFallback = sorted.filter(m => (m.media || []).length && m.type !== 'story').slice(0, Math.max(0, 8 - storyMoments.length));
+  const stories = [...storyMoments, ...recentStoryFallback].slice(0, 12);
+  const feedPosts = sorted.filter(m => m.type !== 'story');
   return `
     <section class="insta-shell">
       <div class="stories-row card pad">
-        <button class="story add-story" data-action="open-composer">
-          <span>＋</span><b>เพิ่มโมเมนต์</b>
+        <button class="story add-story" data-action="quick-story">
+          <span>＋</span><b>Your story</b>
         </button>
-        ${stories.map(m => `
-          <button class="story" data-action="toggle-feature" data-id="${escapeAttr(m.id)}">
+        ${stories.map((m, index) => `
+          <button class="story" data-action="open-story" data-id="${escapeAttr(m.id)}" data-index="${index}">
             <span class="story-ring">${renderStoryThumb(m)}</span>
             <b>${escapeHtml((m.author || 'เพื่อน').slice(0, 12))}</b>
           </button>
@@ -768,15 +968,16 @@ function renderFeed() {
       <div class="feed-toolbar glass pad">
         <div>
           <h3>Memory Feed</h3>
-          <p class="muted-light">พื้นที่ลงรูป เช็กอิน คอมเมนต์ และเก็บโมเมนต์เด่นของแก๊ง</p>
+          <p class="muted-light">ฟีดรวมของทริป เหมือนโซเชียลเฉพาะแก๊ง</p>
         </div>
         <div class="action-row">
-          <button class="btn accent" data-action="open-composer">＋ เพิ่มโมเมนต์</button>
+          <button class="btn primary" data-action="quick-story">◎ Story</button>
+          <button class="btn accent" data-action="open-composer">＋ Post</button>
         </div>
       </div>
 
       <div class="feed insta-feed">
-        ${sorted.map(renderMomentCard).join('') || '<div class="card empty">ยังไม่มีโพสต์ กด “เพิ่มโมเมนต์” เพื่อเปิดอัลบั้มแรกของทริป 📸</div>'}
+        ${feedPosts.map(renderMomentCard).join('') || '<div class="card empty">ยังไม่มีโพสต์ กด “Post” เพื่อเปิดอัลบั้มแรกของทริป 📸</div>'}
       </div>
     </section>
   `;
@@ -784,7 +985,7 @@ function renderFeed() {
 
 function renderStoryThumb(moment) {
   const media = (moment.media || [])[0];
-  if (!media) return '<span>📍</span>';
+  if (!media) return renderAvatar({ accountId: moment.authorId, name: moment.author, className: 'avatar story-avatar' });
   if (media.localDataUrl && media.mimeType?.startsWith('image/')) return `<img src="${escapeAttr(media.localDataUrl)}" alt="story" />`;
   if (media.thumbnailLink) return `<img src="${escapeAttr(media.thumbnailLink)}" alt="story" />`;
   if (media.mimeType?.startsWith('video/')) return '<span>▶️</span>';
@@ -793,7 +994,7 @@ function renderStoryThumb(moment) {
 
 function renderMomentCard(moment) {
   const mediaList = Array.isArray(moment.media) ? moment.media : [];
-  const typeIcon = moment.type === 'checkin' ? '📍' : moment.type === 'quote' ? '💬' : moment.type === 'game' ? '🎲' : moment.type === 'quest' ? '🧭' : moment.type === 'secret' ? '🕵️' : moment.type === 'vote' ? '🏆' : '📸';
+  const typeIcon = moment.type === 'story' ? '◎' : moment.type === 'checkin' ? '📍' : moment.type === 'quote' ? '💬' : moment.type === 'game' ? '🎲' : moment.type === 'quest' ? '🧭' : moment.type === 'secret' ? '🕵️' : moment.type === 'vote' ? '🏆' : '📸';
   const mediaHtml = renderAlbumMedia(mediaList, moment.id);
   const reactions = uniqueActiveReactions((state.reactions || []).filter(r => r.momentId === moment.id));
   const reactionText = reactionSummary(reactions);
@@ -802,7 +1003,7 @@ function renderMomentCard(moment) {
   return `
     <article class="card moment-card insta-card">
       <header class="post-head">
-        <span class="avatar" style="background:${escapeAttr(memberColor(moment.author))}">${escapeHtml(initials(moment.author || 'เพื่อน'))}</span>
+        ${renderAvatar({ accountId: moment.authorId, name: moment.author, color: memberColor(moment.author) })}
         <div>
           <b>${escapeHtml(moment.author || 'ไม่ระบุชื่อ')}</b>
           <p>${typeIcon} ${escapeHtml(moment.place || moment.mood || 'กาญนะจ๊ะบุรี')} · ${formatThaiDate(moment.createdAt)}</p>
@@ -829,7 +1030,8 @@ function renderMomentCard(moment) {
 }
 
 function memberColor(name) {
-  return (state.members || []).find(m => m.name === name)?.color || '#0f6b5e';
+  const person = accountForDisplay({ name });
+  return person?.color || '#0f6b5e';
 }
 
 function renderComments(momentId) {
@@ -902,8 +1104,13 @@ function renderAccountModal() {
         </div>
         <form class="stack" data-form="profile">
           <div class="profile-card-preview">
-            <span class="avatar big" style="background:${escapeAttr(state.profile.color || '#0f6b5e')}">${escapeHtml(initials(currentUserName()))}</span>
+            ${currentAvatar('avatar big')}
             <div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · @${escapeHtml(account.username || '')}</p></div>
+          </div>
+          <div class="field avatar-upload-field">
+            <label>รูปโปรไฟล์</label>
+            <input class="input" name="avatar" type="file" accept="image/*" />
+            <small>เลือกรูปใหม่เพื่อแสดงใน Feed, Story, คอมเมนต์ และรายชื่อสมาชิก</small>
           </div>
           <div class="grid two">
             <div class="field"><label>ชื่อที่แสดง</label><input class="input" name="name" required value="${escapeAttr(state.profile.name || '')}" placeholder="เช่น ต้น" /></div>
@@ -947,7 +1154,8 @@ function renderComposerModal() {
             <div class="field"><label>บัญชีที่โพสต์</label><input class="input" name="author" value="${escapeAttr(currentUserName())}" readonly /></div>
             <div class="field"><label>ประเภทโพสต์</label>
               <select class="select" name="type">
-                <option value="moment" ${composer.type === 'moment' ? 'selected' : ''}>โมเมนต์</option>
+                <option value="moment" ${composer.type === 'moment' ? 'selected' : ''}>โพสต์</option>
+                <option value="story" ${composer.type === 'story' ? 'selected' : ''}>Story</option>
                 <option value="checkin" ${composer.type === 'checkin' ? 'selected' : ''}>เช็กอิน</option>
                 <option value="game" ${composer.type === 'game' ? 'selected' : ''}>โมเมนต์จากเกม</option>
                 <option value="quest" ${composer.type === 'quest' ? 'selected' : ''}>หลักฐานภารกิจ</option>
@@ -1127,14 +1335,34 @@ function renderRecap() {
 function renderTools() {
   const expenseList = activeList('expenses').sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   const total = expenseList.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  return `
-    <section class="grid two">
-      <div class="card pad stack">
+  const isAdmin = isAdminAccount();
+  const inviteReady = state.settings.firebaseEnabled && state.settings.firebaseProjectId && state.settings.firebaseApiKey && state.settings.firebaseAppId;
+  const tripPanel = isAdmin ? `
         <h3>⚙️ ตั้งค่าทริป</h3>
-        <div class="profile-card-preview compact"><span class="avatar" style="background:${escapeAttr(state.profile.color || '#0f6b5e')}">${escapeHtml(initials(currentUserName()))}</span><div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · ${state.settings.adminDriveOwner ? 'Drive โดย Admin: ' + escapeHtml(state.settings.adminDriveOwner) : 'ยังไม่มี Admin Drive Hub'}</p></div><button class="btn ghost" data-action="open-account">แก้บัญชี</button></div>
+        <form class="stack trip-settings-form" data-form="trip">
+          <div class="grid two">
+            <div class="field"><label>ชื่อทริป</label><input class="input" name="title" value="${escapeAttr(state.trip.title || '')}" placeholder="เช่น Chiangmai Friends Trip" /></div>
+            <div class="field"><label>ปลายทาง</label><input class="input" name="destination" value="${escapeAttr(state.trip.destination || '')}" placeholder="เช่น เชียงใหม่ / ภูเก็ต / เขาใหญ่" /></div>
+            <div class="field"><label>ช่วง/วันนี้</label><input class="input" name="day" value="${escapeAttr(state.trip.day || '')}" placeholder="Day 1 — เดินทาง / คืนแรก" /></div>
+            <div class="field"><label>Mood วันนี้</label><input class="input" name="mood" value="${escapeAttr(state.trip.mood || '')}" placeholder="คืนนี้ต้องมีตำนาน" /></div>
+          </div>
+          <div class="field"><label>คำอธิบายทริป</label><input class="input" name="subtitle" value="${escapeAttr(state.trip.subtitle || '')}" placeholder="ประโยคสั้น ๆ สำหรับหน้าแรก" /></div>
+          <div class="field"><label>แผนวันนี้ / สิ่งต่อไป</label><input class="input" name="nextPlan" value="${escapeAttr(state.trip.nextPlan || '')}" placeholder="เช่น เช็กอินที่พัก > เล่นเกม > Vlog Night" /></div>
+          <button class="btn primary" type="submit">บันทึกข้อมูลทริป</button>
+        </form>` : `
+        <h3>🏕️ ข้อมูลทริป</h3>
+        <div class="trip-summary-card">
+          <span class="tag">${escapeHtml(state.trip.day || 'Trip Mode')}</span>
+          <h2>${escapeHtml(state.trip.title || 'ทริปของเรา')}</h2>
+          <p>${escapeHtml(state.trip.destination || 'ปลายทางของทริป')}</p>
+          <small>${escapeHtml(state.trip.nextPlan || state.trip.subtitle || 'ดูแผนวันนี้และโมเมนต์จากเพื่อนในหน้า Home/Feed')}</small>
+        </div>`;
+
+  const adminHubPanel = `
         <form class="stack" data-form="settings">
           <div class="firebase-panel">
-            <h3>การแชร์ข้อมูลร่วมกัน</h3>
+            <h3>Admin Hub</h3>
+            <p class="muted">ตั้งค่าครั้งเดียว สมาชิกจะรับค่า Hub ผ่านลิงก์เชิญและ Firebase โดยไม่ต้องเห็นหน้าตั้งค่า</p>
             <label class="checkline"><input type="checkbox" name="firebaseEnabled" ${state.settings.firebaseEnabled ? 'checked' : ''}> เปิดการแชร์ Feed แบบเรียลไทม์</label>
             <div class="grid two">
               <div class="field"><label>Trip ID</label><input class="input" name="firebaseTripId" value="${escapeAttr(state.settings.firebaseTripId || 'kannajaburi-trip')}" placeholder="kannajaburi-trip" /></div>
@@ -1142,8 +1370,8 @@ function renderTools() {
               <div class="field"><label>API Key</label><input class="input" name="firebaseApiKey" value="${escapeAttr(state.settings.firebaseApiKey || '')}" placeholder="AIza..." /></div>
               <div class="field"><label>Auth Domain</label><input class="input" name="firebaseAuthDomain" value="${escapeAttr(state.settings.firebaseAuthDomain || '')}" placeholder="project.firebaseapp.com" /></div>
               <div class="field"><label>App ID</label><input class="input" name="firebaseAppId" value="${escapeAttr(state.settings.firebaseAppId || '')}" placeholder="1:xxx:web:xxx" /></div>
-              <div class="field"><label>Storage Bucket (ไม่บังคับ)</label><input class="input" name="firebaseStorageBucket" value="${escapeAttr(state.settings.firebaseStorageBucket || '')}" placeholder="project.appspot.com" /></div>
-              <div class="field"><label>Messaging Sender ID (ไม่บังคับ)</label><input class="input" name="firebaseMessagingSenderId" value="${escapeAttr(state.settings.firebaseMessagingSenderId || '')}" placeholder="123456789" /></div>
+              <div class="field"><label>Storage Bucket</label><input class="input" name="firebaseStorageBucket" value="${escapeAttr(state.settings.firebaseStorageBucket || '')}" placeholder="project.appspot.com" /></div>
+              <div class="field"><label>Messaging Sender ID</label><input class="input" name="firebaseMessagingSenderId" value="${escapeAttr(state.settings.firebaseMessagingSenderId || '')}" placeholder="123456789" /></div>
             </div>
           </div>
           <div class="field"><label>Google OAuth Client ID</label><input class="input" name="driveClientId" value="${escapeAttr(state.settings.driveClientId)}" placeholder="xxxxx.apps.googleusercontent.com" /></div>
@@ -1151,31 +1379,55 @@ function renderTools() {
           <div class="field"><label>ชื่อโฟลเดอร์ถ้าจะให้แอพสร้างใหม่</label><input class="input" name="driveRootFolderName" value="${escapeAttr(state.settings.driveRootFolderName)}" /></div>
           <label class="checkline"><input type="checkbox" name="autoSyncOnStart" ${state.settings.autoSyncOnStart ? 'checked' : ''}> อัปเดตข้อมูลตอนเปิดแอพ</label>
           <label class="checkline"><input type="checkbox" name="liveSyncEnabled" ${state.settings.liveSyncEnabled ? 'checked' : ''}> อัปเดตข้อมูลระหว่างใช้งาน</label>
-          <label class="checkline"><input type="checkbox" name="driveManagedByAdmin" ${state.settings.driveManagedByAdmin !== false ? 'checked' : ''}> รับค่าพื้นที่รูปจาก Admin อัตโนมัติ</label>
+          <input type="hidden" name="driveManagedByAdmin" value="on" />
           <div class="field"><label>ความถี่ Auto Sync (วินาที)</label><input class="input" name="syncIntervalSec" type="number" min="15" max="120" value="${Number(state.settings.syncIntervalSec || 20)}" /></div>
           <label class="checkline"><input type="checkbox" name="useIncrementalSync" ${state.settings.useIncrementalSync !== false ? 'checked' : ''}> โหลดเฉพาะข้อมูลใหม่</label>
-          <button class="btn primary" type="submit">บันทึกการตั้งค่า</button>
+          <button class="btn primary" type="submit">บันทึก Admin Hub</button>
         </form>
+        <div class="admin-share-panel">
+          <div><b>ลิงก์เชิญสมาชิก</b><p>สมาชิกเปิดลิงก์นี้แล้วระบบจะรับค่า Firebase/Drive อัตโนมัติ โดยไม่ต้องตั้งค่าเอง</p></div>
+          <button class="btn accent" data-action="copy-invite-link" ${inviteReady ? '' : 'disabled'}>คัดลอกลิงก์เชิญ</button>
+        </div>
         <div class="grid two">
           <button class="btn accent" data-action="connect-firebase">เชื่อมต่อข้อมูล</button>
           <button class="btn" data-action="push-firebase">ส่งข้อมูลที่รออยู่</button>
           <button class="btn accent" data-action="connect-drive">เชื่อมต่อพื้นที่รูป</button>
-          <button class="btn primary" data-action="publish-admin-drive">👑 แชร์พื้นที่รูปให้ทุกคน</button>
+          <button class="btn primary" data-action="publish-admin-drive">👑 แชร์ Hub ให้ทุกคน</button>
           <button class="btn" data-action="create-drive-folder">สร้างโฟลเดอร์รูปทริป</button>
           <button class="btn" data-action="sync-drive">อัปเดตพื้นที่รูป</button>
           <button class="btn" data-action="full-sync">โหลดข้อมูลใหม่ทั้งหมด</button>
           <button class="btn" data-action="upload-pending">ส่งรูป/ข้อมูลที่รออยู่</button>
+        </div>`;
+
+  const memberHubPanel = `
+        <div class="member-hub-card">
+          <span class="status-dot ${firebase.connected ? 'online' : ''}"></span>
+          <div>
+            <b>${firebase.connected ? 'เชื่อมต่อ Social Feed แล้ว' : 'กำลังรอเชื่อมต่อจาก Admin Hub'}</b>
+            <p>${state.settings.adminDriveOwner ? `พื้นที่รูปจัดการโดย ${escapeHtml(state.settings.adminDriveOwner)}` : 'สมาชิกไม่ต้องตั้งค่า Firebase/Drive เอง ถ้ายังไม่เชื่อมต่อให้เปิดลิงก์เชิญจาก Admin'}</p>
+          </div>
         </div>
+        <div class="grid two">
+          <button class="btn accent" data-action="connect-firebase">เชื่อมต่อข้อมูลอีกครั้ง</button>
+          <button class="btn" data-action="upload-pending">ส่งโพสต์ที่รออยู่</button>
+        </div>`;
+
+  return `
+    <section class="grid two">
+      <div class="card pad stack">
+        ${tripPanel}
+        <div class="profile-card-preview compact">${currentAvatar('avatar')}<div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · ${state.settings.adminDriveOwner ? 'Hub โดย Admin: ' + escapeHtml(state.settings.adminDriveOwner) : 'พร้อมเที่ยว'}</p></div><button class="btn ghost" data-action="open-account">แก้บัญชี</button></div>
+        ${isAdmin ? adminHubPanel : memberHubPanel}
       </div>
 
       <div class="card pad stack">
         <h3>👥 สมาชิกแก๊ง</h3>
-        <form class="grid two" data-form="member">
+        ${isAdmin ? `<form class="grid two" data-form="member">
           <div class="field"><label>ชื่อเล่น</label><input class="input" name="name" required placeholder="เช่น บอส" /></div>
           <div class="field"><label>สาย</label><select class="select" name="role"><option>สายคอนเทนต์</option><option>สายฮา</option><option>สายกิน</option><option>สายหลับ</option><option>สายเปย์</option><option>สายไกด์</option></select></div>
           <div class="field"><label>สี</label><input class="input" name="color" type="color" value="#0f6b5e" /></div>
           <button class="btn primary" type="submit">เพิ่มสมาชิก</button>
-        </form>
+        </form>` : ''}
         ${renderMembers()}
       </div>
     </section>
@@ -1245,6 +1497,58 @@ function renderReelMedia(media) {
   return '';
 }
 
+
+function storySourceList() {
+  const sorted = activeList('moments').sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  const storyMoments = sorted.filter(m => (m.type === 'story' || m.story === true || m.source === 'story') && (m.media || []).length);
+  const fallback = sorted.filter(m => (m.media || []).length && m.type !== 'story').slice(0, Math.max(0, 8 - storyMoments.length));
+  return [...storyMoments, ...fallback].slice(0, 12);
+}
+
+function openStory(id) {
+  const list = storySourceList();
+  const index = Math.max(0, list.findIndex(m => m.id === id));
+  storyViewer = { open: true, id: list[index]?.id || id, index, timer: null };
+  render();
+}
+
+function closeStory() {
+  if (storyViewer.timer) clearTimeout(storyViewer.timer);
+  storyViewer = { open: false, id: '', index: 0, timer: null };
+  render();
+}
+
+function moveStory(delta = 1) {
+  const list = storySourceList();
+  if (!list.length) return closeStory();
+  const next = (storyViewer.index + delta + list.length) % list.length;
+  storyViewer = { open: true, id: list[next].id, index: next, timer: null };
+  render();
+}
+
+function renderStoryViewer() {
+  const list = storySourceList();
+  const story = list[storyViewer.index] || list.find(m => m.id === storyViewer.id);
+  if (!story) return '';
+  const mediaList = Array.isArray(story.media) ? story.media : [];
+  return `
+    <div class="story-viewer" data-action="close-story">
+      <div class="story-panel" data-modal-panel>
+        <div class="story-progress">${list.map((_, i) => `<span class="${i <= storyViewer.index ? 'active' : ''}"></span>`).join('')}</div>
+        <header class="story-viewer-head">
+          ${renderAvatar({ accountId: story.authorId, name: story.author })}
+          <div><b>${escapeHtml(story.author || 'เพื่อน')}</b><p>${formatThaiDate(story.createdAt)}</p></div>
+          <button class="icon-btn" data-action="close-story" aria-label="ปิด Story">✕</button>
+        </header>
+        <div class="story-media-stage">${mediaList.length ? renderMedia(mediaList[0]) : '<span>Story</span>'}</div>
+        <div class="story-caption"><b>${escapeHtml(story.place || story.mood || 'Story')}</b><p>${escapeHtml(story.caption || '')}</p></div>
+        <button class="story-nav prev" data-action="prev-story">‹</button>
+        <button class="story-nav next" data-action="next-story">›</button>
+      </div>
+    </div>
+  `;
+}
+
 function buildReelItems() {
   const cover = [{ kicker: 'Memory Reel', title: state.trip.title, text: state.trip.subtitle, media: [] }];
   const activeMoments = activeList('moments');
@@ -1274,7 +1578,8 @@ function openComposer(dataset = {}) {
     type: dataset.type || 'moment',
     gameCard: dataset.gameCard || '',
     questId: dataset.questId || dataset.id || '',
-    questTitle: dataset.questTitle || ''
+    questTitle: dataset.questTitle || '',
+    gps: null
   };
   render();
 }
@@ -1322,6 +1627,7 @@ function closeComposer() {
 function onKeyDown(event) {
   if (event.key !== 'Escape') return;
   if (composer.open) return closeComposer();
+  if (storyViewer.open) return closeStory();
   if (state.accountModalOpen) { state.accountModalOpen = false; persist(); render(); return; }
   if (reel.open) return closeReel();
 }
@@ -1338,11 +1644,18 @@ async function onClick(event) {
   // Modal backdrops close only when tapping the dimmed area itself; buttons inside modals keep working.
   // Using capture mode makes the ✕ buttons reliable even on mobile browsers/PWA mode.
   if (btn.classList.contains('modal-backdrop') && event.target !== btn) return;
+  if (btn.classList.contains('story-viewer') && event.target !== btn) return;
   const action = btn.dataset.action;
   if (action && btn.tagName === 'BUTTON') event.preventDefault();
 
   try {
     if (action === 'quick-moment' || action === 'open-composer') return openComposer(btn.dataset);
+    if (action === 'quick-story') return openComposer({ source: 'story', type: 'story', mood: 'Story', caption: '', place: state.trip.destination || '' });
+    if (action === 'quick-checkin') return openComposer({ source: 'checkin', type: 'checkin', mood: 'เช็กอิน', caption: 'เช็กอินทริปนี้', place: state.trip.destination || '' });
+    if (action === 'open-story') return openStory(btn.dataset.id);
+    if (action === 'close-story') return closeStory();
+    if (action === 'next-story') return moveStory(1);
+    if (action === 'prev-story') return moveStory(-1);
     if (action === 'logout') return logoutAccount();
     if (action === 'capture-gps') return captureGpsForComposer();
     if (action === 'open-account') { state.accountModalOpen = true; render(); return; }
@@ -1378,6 +1691,7 @@ async function onClick(event) {
     if (action === 'full-sync') return fullSyncDrive();
     if (action === 'upload-pending') return uploadPendingMoments();
     if (action === 'publish-admin-drive') return publishAdminDriveSettings();
+    if (action === 'copy-invite-link') return copyAdminInviteLink();
     if (action === 'open-reel') return openReel();
     if (action === 'close-reel') return closeReel();
     if (action === 'next-reel') return moveReel(1);
@@ -1402,6 +1716,7 @@ async function onSubmit(event) {
     if (type === 'admin-login') return loginAdmin(new FormData(form));
     if (type === 'member-login') return loginMember(new FormData(form));
     if (type === 'profile') return saveProfile(new FormData(form));
+    if (type === 'trip') return saveTripSettings(new FormData(form));
     if (type === 'member') return addMember(new FormData(form), form);
     if (type === 'moment') return addMoment(new FormData(form), form);
     if (type === 'settings') return saveSettings(new FormData(form));
@@ -1504,6 +1819,27 @@ async function captureGpsForComposer() {
   }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 });
 }
 
+async function saveTripSettings(data) {
+  if (!requireAdmin('เฉพาะ Admin เท่านั้นที่แก้ข้อมูลทริปได้')) return;
+  state.trip ||= {};
+  const now = new Date().toISOString();
+  state.trip.title = String(data.get('title') || state.trip.title || state.appName || '').trim() || 'Trip Memory';
+  state.trip.subtitle = String(data.get('subtitle') || '').trim() || 'แชร์รูป เช็กอิน เล่นเกม และเก็บความทรงจำร่วมกัน';
+  state.trip.destination = String(data.get('destination') || '').trim() || 'ทริปของเรา';
+  state.trip.day = String(data.get('day') || '').trim() || 'วันนี้';
+  state.trip.mood = String(data.get('mood') || '').trim() || 'พร้อมสร้างโมเมนต์';
+  state.trip.nextPlan = String(data.get('nextPlan') || '').trim();
+  const record = { id: 'trip-profile', ...state.trip, updatedAt: now, updatedBy: currentUserName(), accountId: currentAccountId(), storage: 'local' };
+  state.tripSettings ||= [];
+  const index = state.tripSettings.findIndex(x => x.id === record.id);
+  if (index >= 0) state.tripSettings[index] = { ...state.tripSettings[index], ...record };
+  else state.tripSettings.push(record);
+  persist();
+  await uploadRecordIfConnected('tripSettings', record);
+  toast('บันทึกข้อมูลทริปแล้ว');
+  render();
+}
+
 async function saveProfile(data) {
   const now = new Date().toISOString();
   const account = activeAccount();
@@ -1520,12 +1856,27 @@ async function saveProfile(data) {
   account.name = String(data.get('name') || '').trim();
   account.role = String(data.get('role') || 'สายคอนเทนต์');
   account.color = String(data.get('color') || '#0f6b5e');
+  const avatarFile = data.get('avatar');
+  if (avatarFile && avatarFile.size) {
+    try {
+      account.avatarDataUrl = await fileToOptimizedDataUrl(avatarFile, 720, 0.86);
+    } catch (error) {
+      console.warn('Avatar optimization fallback:', error);
+      account.avatarDataUrl = await fileToDataUrl(avatarFile);
+    }
+    account.avatarMimeType = avatarFile.type || 'image/jpeg';
+    account.avatarName = avatarFile.name || 'profile-image';
+    account.avatarUpdatedAt = now;
+  }
   account.updatedAt = now;
   account.storage = account.storage === 'firebase' ? 'local' : account.storage || 'local';
   state.profile.name = account.name;
   state.profile.username = account.username;
   state.profile.role = account.role;
   state.profile.color = account.color;
+  state.profile.avatarDataUrl = account.avatarDataUrl || '';
+  state.profile.avatarMimeType = account.avatarMimeType || '';
+  state.profile.avatarName = account.avatarName || '';
   state.profile.isAdmin = Boolean(account.isAdmin);
   const index = state.accounts.findIndex(a => a.id === account.id);
   if (index >= 0) state.accounts[index] = account;
@@ -1691,6 +2042,7 @@ function stripTransientMedia(media = {}) {
 }
 
 function saveSettings(data) {
+  if (!requireAdmin('เฉพาะ Admin เท่านั้นที่ตั้งค่า Firebase/Drive ได้')) return;
   const oldFolder = state.settings.driveRootFolderId;
   state.settings.driveClientId = String(data.get('driveClientId') || '').trim();
   state.settings.driveRootFolderId = extractDriveFolderId(String(data.get('driveRootFolderId') || '').trim());
@@ -2153,17 +2505,18 @@ async function connectDrive() {
   persist();
   startSyncLoop();
   await syncDrive({ silent: true, uploadPendingFirst: true });
-  if (state.profile.isAdmin && state.settings.firebaseEnabled && firebase.connected) await publishAdminDriveSettings();
+  if (isAdminAccount() && state.settings.firebaseEnabled && firebase.connected) await publishAdminDriveSettings();
   render();
 }
 
 async function createDriveFolder() {
+  if (!requireAdmin('เฉพาะ Admin เท่านั้นที่สร้างโฟลเดอร์รูปทริปได้')) return;
   await drive.authorize({ prompt: drive.connected ? '' : 'consent' });
   const folder = await drive.createTripFolder(state.settings.driveRootFolderName);
   toast(`สร้างโฟลเดอร์แล้ว: ${folder.name}`);
   startSyncLoop();
   await uploadPendingMoments({ silent: true });
-  if (state.profile.isAdmin && state.settings.firebaseEnabled && firebase.connected) await publishAdminDriveSettings();
+  if (isAdminAccount() && state.settings.firebaseEnabled && firebase.connected) await publishAdminDriveSettings();
   render();
 }
 
@@ -2319,9 +2672,25 @@ async function uploadMomentRecordIfConnected(moment) {
 }
 
 
+function applyTripProfile(record = {}) {
+  if (!record || record.id !== 'trip-profile') return false;
+  state.trip ||= {};
+  const fields = ['title', 'subtitle', 'destination', 'day', 'mood', 'nextPlan'];
+  let changed = false;
+  for (const key of fields) {
+    if (record[key] !== undefined && state.trip[key] !== record[key]) {
+      state.trip[key] = record[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function applyFirebaseData(shared = {}) {
   mergeRemote('accounts', shared.accounts || [], 'firebase');
   mergeRemote('tripSettings', shared.tripSettings || [], 'firebase');
+  const tripProfile = (state.tripSettings || []).find(x => x.id === 'trip-profile');
+  if (tripProfile) applyTripProfile(tripProfile);
   const adminDrive = (state.tripSettings || []).find(x => x.id === 'admin-drive-hub');
   if (state.settings.driveManagedByAdmin !== false && adminDrive) {
     const driveChanged = applyAdminDriveSettings(adminDrive);
@@ -2345,6 +2714,8 @@ function applyFirebaseData(shared = {}) {
 function applyDriveData(shared = {}) {
   mergeRemote('accounts', shared.accounts || [], 'drive');
   mergeRemote('tripSettings', shared.tripSettings || [], 'drive');
+  const tripProfile = (state.tripSettings || []).find(x => x.id === 'trip-profile');
+  if (tripProfile) applyTripProfile(tripProfile);
   mergeRemote('members', shared.members || [], 'drive');
   mergeRemote('moments', shared.moments || [], 'drive');
   mergeRemote('reactions', shared.reactions || [], 'drive');

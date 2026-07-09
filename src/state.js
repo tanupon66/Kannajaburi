@@ -1,21 +1,26 @@
-export const STORAGE_KEY = 'kannajaburi-trip-state-v10';
-export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v9';
-export const OLD_STORAGE_KEYS = ['kannajaburi-trip-state-v8','kannajaburi-trip-state-v7','kannajaburi-trip-state-v6'];
+export const STORAGE_KEY = 'kannajaburi-trip-state-v12';
+export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v11';
+export const OLD_STORAGE_KEYS = ['kannajaburi-trip-state-v10','kannajaburi-trip-state-v9','kannajaburi-trip-state-v8','kannajaburi-trip-state-v7','kannajaburi-trip-state-v6'];
 
 export const DEFAULT_STATE = {
-  schema: 10,
+  schema: 12,
   appName: 'กาญนะจ๊ะบุรีทริป',
   trip: {
     title: 'กาญนะจ๊ะบุรีทริป',
     subtitle: 'เที่ยวให้สุด เล่นให้ยับ เก็บความทรงจำให้ครบ',
+    destination: 'กาญจนบุรี',
     day: 'Day 1 — เขื่อนเขาแหลม / คืนแพ',
-    mood: 'คืนนี้ต้องมีตำนาน'
+    mood: 'คืนนี้ต้องมีตำนาน',
+    nextPlan: 'เพิ่มแผนวันนี้ เช่น ออกเดินทาง / เช็กอิน / เล่นเกม / Vlog Night'
   },
   profile: {
     accountId: '',
     name: '',
     role: 'สายคอนเทนต์',
     color: '#0f6b5e',
+    avatarDataUrl: '',
+    avatarMimeType: '',
+    avatarName: '',
     isAdmin: false,
     pinHint: '',
     createdAt: ''
