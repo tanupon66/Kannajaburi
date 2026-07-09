@@ -1,14 +1,14 @@
-const CACHE_NAME = 'kannajaburi-trip-v1.9.0';
+const CACHE_NAME = 'kannajaburi-trip-v2.1.0';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.webmanifest',
-  './src/app.js',
+  './src/app.js?v=2.1.0',
   './src/state.js',
   './src/drive.js',
   './src/firebaseHub.js',
   './src/mediaStore.js',
-  './src/styles.css',
+  './src/styles.css?v=2.1.0',
   './assets/icons/icon-192.png',
   './assets/icons/icon-512.png'
 ];
@@ -42,3 +42,5 @@ self.addEventListener('fetch', event => {
     })
   );
 });
+
+// v2.1.0: cache bust for UI, Story, Profile Avatar and Admin-only Hub.
