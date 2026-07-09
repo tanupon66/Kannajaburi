@@ -14,6 +14,7 @@ import { FirebaseHub } from './firebaseHub.js';
 import { mediaId, saveMediaBlob, getMediaBlob, mediaBlobUrl } from './mediaStore.js';
 
 let state = loadState();
+const ACCOUNT_SESSION_KEY = 'kannajaburi-trip-active-account-v1';
 let currentPage = 'home';
 let deferredInstallPrompt = null;
 let currentGameDeck = 'most';
@@ -47,6 +48,56 @@ const firebase = new FirebaseHub({
   onData: applyFirebaseData
 });
 
+
+
+function readAccountSession() {
+  try {
+    return JSON.parse(localStorage.getItem(ACCOUNT_SESSION_KEY) || 'null');
+  } catch (error) {
+    console.warn('Cannot read account session:', error);
+    return null;
+  }
+}
+
+function saveAccountSession(account = {}) {
+  try {
+    if (!account.accountId && !account.id) return;
+    const session = {
+      accountId: account.accountId || account.id,
+      name: account.name || '',
+      role: account.role || 'สายคอนเทนต์',
+      color: account.color || '#0f6b5e',
+      isAdmin: Boolean(account.isAdmin),
+      savedAt: new Date().toISOString()
+    };
+    localStorage.setItem(ACCOUNT_SESSION_KEY, JSON.stringify(session));
+  } catch (error) {
+    console.warn('Cannot save account session:', error);
+  }
+}
+
+function restoreProfileFromSession() {
+  state.profile ||= {};
+  const session = readAccountSession();
+  const currentId = state.profile.accountId || session?.accountId || '';
+  const savedAccount = currentId ? (state.accounts || []).find(a => a.id === currentId || a.accountId === currentId) : null;
+  const savedMember = currentId ? (state.members || []).find(m => m.accountId === currentId || m.id === currentId) : null;
+  const source = savedAccount || savedMember || session;
+  if (source) {
+    state.profile.accountId = currentId || source.accountId || source.id || state.profile.accountId;
+    state.profile.name ||= source.name || '';
+    state.profile.role ||= source.role || 'สายคอนเทนต์';
+    state.profile.color ||= source.color || '#0f6b5e';
+    if (typeof source.isAdmin === 'boolean') state.profile.isAdmin = source.isAdmin;
+    state.profile.createdAt ||= source.createdAt || session?.savedAt || new Date().toISOString();
+  }
+  if (state.profile.accountId && state.profile.name) {
+    saveAccountSession({ ...state.profile, id: state.profile.accountId });
+  }
+  // UI state from older versions must never force account modal on reload.
+  state.accountModalOpen = false;
+  persist();
+}
 
 function currentAccountId() {
   if (!state.profile.accountId) {
@@ -275,14 +326,16 @@ function init() {
     event.preventDefault();
     deferredInstallPrompt = event;
   });
-  document.addEventListener('click', onClick);
+  document.addEventListener('click', onClick, true);
   document.addEventListener('submit', onSubmit);
   document.addEventListener('change', onChange);
+  document.addEventListener('keydown', onKeyDown);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && drive.connected && state.settings.liveSyncEnabled) syncDrive({ silent: true }).catch(console.warn);
   });
+  restoreProfileFromSession();
   if (!state.profile.accountId) currentAccountId();
-  if (!state.profile.name) state.accountModalOpen = true;
+  state.accountModalOpen = !Boolean(state.profile.name);
   render();
   setTimeout(autoConnectFirebaseOnStart, 350);
   setTimeout(autoConnectDriveOnStart, 800);
@@ -658,13 +711,13 @@ function renderAccountModal() {
   const accountId = currentAccountId();
   return `
     <div class="modal-backdrop" data-action="close-account">
-      <div class="composer-modal card account-modal" role="dialog" aria-modal="true" aria-label="บัญชีของฉัน" onclick="event.stopPropagation()">
+      <div class="composer-modal card account-modal" data-modal-panel role="dialog" aria-modal="true" aria-label="บัญชีของฉัน" tabindex="-1">
         <div class="composer-head">
           <div>
             <h3>บัญชีของฉัน</h3>
             <p class="muted">ทุกคนมีบัญชีแยกกัน ใช้สำหรับโพสต์ คอมเมนต์ และจำกัด reaction คนละ 1 ครั้งต่อโมเมนต์</p>
           </div>
-          <button class="icon-btn" data-action="close-account">✕</button>
+          <button class="icon-btn" type="button" data-action="close-account" aria-label="ปิดหน้าบัญชี">✕</button>
         </div>
         <form class="stack" data-form="profile">
           <div class="profile-card-preview">
@@ -690,13 +743,13 @@ function renderComposerModal() {
   const isQuest = composer.source === 'quest';
   return `
     <div class="modal-backdrop" data-action="close-composer">
-      <div class="composer-modal card" role="dialog" aria-modal="true" aria-label="เพิ่มโมเมนต์" onclick="event.stopPropagation()">
+      <div class="composer-modal card" data-modal-panel role="dialog" aria-modal="true" aria-label="เพิ่มโมเมนต์" tabindex="-1">
         <div class="composer-head">
           <div>
             <h3>${isGame ? 'โพสต์โมเมนต์จากเกม' : isQuest ? 'โพสต์หลักฐานภารกิจ' : 'สร้างโพสต์ใหม่'}</h3>
             <p class="muted">อัปโหลดรูป/วิดีโอได้ทั้งอัลบั้ม เก็บไฟล์ต้นฉบับเต็มความละเอียดใน Google Drive และส่งโพสต์เข้า Firebase Feed</p>
           </div>
-          <button class="icon-btn" data-action="close-composer">✕</button>
+          <button class="icon-btn" type="button" data-action="close-composer" aria-label="ปิดหน้าเพิ่มโมเมนต์">✕</button>
         </div>
         <form class="stack" data-form="moment">
           <input type="hidden" name="source" value="${escapeAttr(composer.source)}" />
@@ -1069,8 +1122,15 @@ function openQuestComposer(id) {
 }
 
 function closeComposer() {
-  composer.open = false;
+  composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '' };
   render();
+}
+
+function onKeyDown(event) {
+  if (event.key !== 'Escape') return;
+  if (composer.open) return closeComposer();
+  if (state.accountModalOpen) { state.accountModalOpen = false; persist(); render(); return; }
+  if (reel.open) return closeReel();
 }
 
 async function onClick(event) {
@@ -1082,12 +1142,16 @@ async function onClick(event) {
   }
   const btn = event.target.closest('[data-action]');
   if (!btn) return;
+  // Modal backdrops close only when tapping the dimmed area itself; buttons inside modals keep working.
+  // Using capture mode makes the ✕ buttons reliable even on mobile browsers/PWA mode.
+  if (btn.classList.contains('modal-backdrop') && event.target !== btn) return;
   const action = btn.dataset.action;
+  if (action && btn.tagName === 'BUTTON') event.preventDefault();
 
   try {
     if (action === 'quick-moment' || action === 'open-composer') return openComposer(btn.dataset);
     if (action === 'open-account') { state.accountModalOpen = true; render(); return; }
-    if (action === 'close-account') { state.accountModalOpen = false; render(); return; }
+    if (action === 'close-account') { state.accountModalOpen = false; persist(); render(); return; }
     if (action === 'close-composer') return closeComposer();
     if (action === 'start-game') { currentPage = 'games'; render(); return; }
     if (action === 'toggle-quest') return toggleQuest(btn.dataset.id);
@@ -1194,11 +1258,18 @@ async function saveProfile(data) {
   const memberIndex = state.members.findIndex(m => m.accountId === account.id || m.id === account.id || m.name === member.name);
   if (memberIndex >= 0) state.members[memberIndex] = { ...state.members[memberIndex], ...member };
   else state.members.push(member);
-  persist();
-  await Promise.all([uploadRecordIfConnected('accounts', account), uploadRecordIfConnected('members', member)]);
   state.accountModalOpen = false;
-  toast('บันทึกบัญชีแล้ว');
+  saveAccountSession({ ...account, accountId: account.id });
+  persist();
   render();
+  toast('บันทึกบัญชีแล้ว');
+  Promise.all([uploadRecordIfConnected('accounts', account), uploadRecordIfConnected('members', member)])
+    .then(() => { persist(); renderSyncStatusOnly(); })
+    .catch(error => {
+      console.warn('Account saved locally; sync will retry later:', error);
+      state.settings.lastFirebaseError = error.message || String(error);
+      persist();
+    });
 }
 
 async function addMember(data, form) {
@@ -2193,9 +2264,10 @@ async function installApp() {
 }
 
 function resetLocal() {
-  if (!confirm('ล้างข้อมูล Local ในเครื่องนี้? ข้อมูลบน Google Drive จะไม่ถูกลบ')) return;
-  ['kannajaburi-trip-state-v7','kannajaburi-trip-state-v6','kannajaburi-trip-state-v5','kannajaburi-trip-state-v4','kannajaburi-trip-state-v3'].forEach(key => localStorage.removeItem(key));
+  if (!confirm('ล้างข้อมูล Local ในเครื่องนี้? ข้อมูลบน Firebase/Google Drive จะไม่ถูกลบ')) return;
+  ['kannajaburi-trip-state-v9','kannajaburi-trip-state-v8','kannajaburi-trip-state-v7','kannajaburi-trip-state-v6','kannajaburi-trip-state-v5','kannajaburi-trip-state-v4','kannajaburi-trip-state-v3', ACCOUNT_SESSION_KEY].forEach(key => localStorage.removeItem(key));
   state = loadState();
+  state.accountModalOpen = true;
   toast('ล้างข้อมูล Local แล้ว');
   render();
 }

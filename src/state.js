@@ -1,8 +1,9 @@
-export const STORAGE_KEY = 'kannajaburi-trip-state-v7';
-export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v6';
+export const STORAGE_KEY = 'kannajaburi-trip-state-v9';
+export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v8';
+export const OLD_STORAGE_KEYS = ['kannajaburi-trip-state-v7','kannajaburi-trip-state-v6'];
 
 export const DEFAULT_STATE = {
-  schema: 7,
+  schema: 9,
   appName: 'กาญนะจ๊ะบุรีทริป',
   trip: {
     title: 'กาญนะจ๊ะบุรีทริป',
@@ -70,9 +71,9 @@ export function uid(prefix = 'id') {
 
 export function loadState() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || OLD_STORAGE_KEYS.map(key => localStorage.getItem(key)).find(Boolean);
     if (!raw) return structuredClone(DEFAULT_STATE);
-    const data = JSON.parse(raw);
+    const data = sanitizePersistedState(JSON.parse(raw));
     return mergeDefaults(structuredClone(DEFAULT_STATE), data);
   } catch (error) {
     console.warn('Cannot load state:', error);
@@ -82,7 +83,8 @@ export function loadState() {
 
 export function saveState(state) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    const clean = sanitizePersistedState(structuredClone(state));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
     return true;
   } catch (error) {
     console.error('Cannot save state:', error);
@@ -114,6 +116,18 @@ export function importState(file) {
     };
     reader.readAsText(file, 'utf-8');
   });
+}
+
+
+function sanitizePersistedState(data) {
+  if (!data || typeof data !== 'object') return data;
+  // Runtime-only UI flags must not be restored after refresh.
+  // v1.7.0 saved accountModalOpen=true in some cases, causing the app to ask users to enter their account again after every refresh.
+  delete data.accountModalOpen;
+  delete data.composerModalOpen;
+  delete data.modalOpen;
+  delete data.reelOpen;
+  return data;
 }
 
 function mergeDefaults(base, data) {

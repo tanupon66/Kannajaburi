@@ -65,6 +65,12 @@ export class FirebaseHub {
     this.db = this.db || mod.getFirestore(this.app);
     this.auth = this.auth || mod.getAuth(this.app);
 
+    try {
+      await mod.setPersistence(this.auth, mod.browserLocalPersistence);
+    } catch (error) {
+      console.warn('Firebase auth local persistence unavailable:', error);
+    }
+
     if (!this.auth.currentUser) {
       const credential = await mod.signInAnonymously(this.auth);
       this.user = credential.user;
