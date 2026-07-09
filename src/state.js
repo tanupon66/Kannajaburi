@@ -1,9 +1,9 @@
-export const STORAGE_KEY = 'kannajaburi-trip-state-v9';
-export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v8';
-export const OLD_STORAGE_KEYS = ['kannajaburi-trip-state-v7','kannajaburi-trip-state-v6'];
+export const STORAGE_KEY = 'kannajaburi-trip-state-v10';
+export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v9';
+export const OLD_STORAGE_KEYS = ['kannajaburi-trip-state-v8','kannajaburi-trip-state-v7','kannajaburi-trip-state-v6'];
 
 export const DEFAULT_STATE = {
-  schema: 9,
+  schema: 10,
   appName: 'กาญนะจ๊ะบุรีทริป',
   trip: {
     title: 'กาญนะจ๊ะบุรีทริป',
@@ -19,6 +19,11 @@ export const DEFAULT_STATE = {
     isAdmin: false,
     pinHint: '',
     createdAt: ''
+  },
+  auth: {
+    activeAccountId: '',
+    lastLoginAt: '',
+    loginRequired: true
   },
   members: [],
   accounts: [],

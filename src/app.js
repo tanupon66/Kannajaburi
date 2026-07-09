@@ -14,12 +14,14 @@ import { FirebaseHub } from './firebaseHub.js';
 import { mediaId, saveMediaBlob, getMediaBlob, mediaBlobUrl } from './mediaStore.js';
 
 let state = loadState();
-const ACCOUNT_SESSION_KEY = 'kannajaburi-trip-active-account-v1';
+const ACCOUNT_SESSION_KEY = 'kannajaburi-trip-active-account-v2';
+const DEFAULT_ADMIN_USERNAME = 'admin';
+const DEFAULT_ADMIN_PASSWORD = '1234';
 let currentPage = 'home';
 let deferredInstallPrompt = null;
 let currentGameDeck = 'most';
 let reel = { open: false, index: 0, timer: null };
-let composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '' };
+let composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '', gps: null };
 let syncTimer = null;
 let isSyncing = false;
 let syncStatus = { text: 'Local cache ready', tone: 'idle' };
@@ -65,6 +67,7 @@ function saveAccountSession(account = {}) {
     const session = {
       accountId: account.accountId || account.id,
       name: account.name || '',
+      username: account.username || '',
       role: account.role || 'สายคอนเทนต์',
       color: account.color || '#0f6b5e',
       isAdmin: Boolean(account.isAdmin),
@@ -76,48 +79,172 @@ function saveAccountSession(account = {}) {
   }
 }
 
+
+function clearAccountSession() {
+  try { localStorage.removeItem(ACCOUNT_SESSION_KEY); } catch (error) { console.warn(error); }
+}
+
+function normalizeUsername(value = '') {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function normalizeName(value = '') {
+  return String(value || '').trim();
+}
+
+async function sha256(text) {
+  const input = new TextEncoder().encode(String(text));
+  const hashBuffer = await crypto.subtle.digest('SHA-256', input);
+  return [...new Uint8Array(hashBuffer)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function passwordHash(username, password) {
+  return sha256(`${normalizeUsername(username)}::${String(password || '')}`);
+}
+
+function findAccountByUsername(username) {
+  const key = normalizeUsername(username);
+  return (state.accounts || []).find(account => isActiveItem(account) && normalizeUsername(account.username || account.name) === key);
+}
+
+function findAccountById(accountId) {
+  return (state.accounts || []).find(account => isActiveItem(account) && (account.id === accountId || account.accountId === accountId));
+}
+
+function activeAccount() {
+  const id = state.auth?.activeAccountId || state.profile?.accountId || '';
+  return id ? findAccountById(id) : null;
+}
+
+function isAuthenticated() {
+  return Boolean(activeAccount() && state.auth?.activeAccountId);
+}
+
+function applyAccountToProfile(account) {
+  if (!account) return;
+  state.auth ||= { activeAccountId: '', lastLoginAt: '', loginRequired: true };
+  state.auth.activeAccountId = account.id || account.accountId;
+  state.auth.lastLoginAt = new Date().toISOString();
+  state.profile ||= {};
+  state.profile.accountId = account.id || account.accountId;
+  state.profile.name = account.name || account.username || 'เพื่อน';
+  state.profile.username = account.username || '';
+  state.profile.role = account.role || 'สายคอนเทนต์';
+  state.profile.color = account.color || '#0f6b5e';
+  state.profile.isAdmin = Boolean(account.isAdmin);
+  state.profile.createdAt ||= account.createdAt || new Date().toISOString();
+  saveAccountSession(account);
+}
+
+function ensureMemberForAccount(account) {
+  if (!account) return null;
+  const now = new Date().toISOString();
+  state.members ||= [];
+  const member = {
+    id: account.id,
+    accountId: account.id,
+    username: account.username || '',
+    name: account.name || account.username || 'เพื่อน',
+    role: account.role || 'สายคอนเทนต์',
+    color: account.color || '#0f6b5e',
+    isAdmin: Boolean(account.isAdmin),
+    createdAt: account.createdAt || now,
+    updatedAt: now,
+    storage: 'local'
+  };
+  const index = state.members.findIndex(m => m.accountId === account.id || m.id === account.id || normalizeUsername(m.username || m.name) === normalizeUsername(account.username || account.name));
+  if (index >= 0) state.members[index] = { ...state.members[index], ...member };
+  else state.members.push(member);
+  return member;
+}
+
+async function createAccount({ username, password, name, role = 'สายคอนเทนต์', color = '#0f6b5e', isAdmin = false, mustChangePassword = false }) {
+  const user = normalizeUsername(username);
+  const displayName = normalizeName(name) || user;
+  if (!user) throw new Error('กรุณาใส่ username');
+  if (String(password || '').length < 4) throw new Error('รหัสผ่านต้องมีอย่างน้อย 4 ตัว');
+  if (findAccountByUsername(user)) throw new Error('username นี้ถูกใช้แล้ว');
+  const now = new Date().toISOString();
+  const account = {
+    id: uid('acct'),
+    accountId: '',
+    username: user,
+    name: displayName,
+    role,
+    color,
+    isAdmin: Boolean(isAdmin),
+    passwordHash: await passwordHash(user, password),
+    mustChangePassword: Boolean(mustChangePassword),
+    createdAt: now,
+    updatedAt: now,
+    storage: 'local'
+  };
+  account.accountId = account.id;
+  state.accounts ||= [];
+  state.accounts.push(account);
+  const member = ensureMemberForAccount(account);
+  persist();
+  Promise.all([uploadRecordIfConnected('accounts', account), member ? uploadRecordIfConnected('members', member) : Promise.resolve()]).catch(console.warn);
+  return account;
+}
+
+async function verifyAccountPassword(account, password) {
+  if (!account?.passwordHash) return false;
+  return account.passwordHash === await passwordHash(account.username || account.name, password);
+}
+
+function logoutAccount() {
+  state.auth ||= {};
+  state.auth.activeAccountId = '';
+  state.profile = { accountId: '', name: '', role: 'สายคอนเทนต์', color: '#0f6b5e', isAdmin: false, pinHint: '', createdAt: '' };
+  clearAccountSession();
+  persist();
+  toast('ออกจากระบบแล้ว');
+  render();
+}
+
 function restoreProfileFromSession() {
+  state.auth ||= { activeAccountId: '', lastLoginAt: '', loginRequired: true };
   state.profile ||= {};
   const session = readAccountSession();
-  const currentId = state.profile.accountId || session?.accountId || '';
-  const savedAccount = currentId ? (state.accounts || []).find(a => a.id === currentId || a.accountId === currentId) : null;
-  const savedMember = currentId ? (state.members || []).find(m => m.accountId === currentId || m.id === currentId) : null;
-  const source = savedAccount || savedMember || session;
-  if (source) {
-    state.profile.accountId = currentId || source.accountId || source.id || state.profile.accountId;
-    state.profile.name ||= source.name || '';
-    state.profile.role ||= source.role || 'สายคอนเทนต์';
-    state.profile.color ||= source.color || '#0f6b5e';
-    if (typeof source.isAdmin === 'boolean') state.profile.isAdmin = source.isAdmin;
+  const sessionId = session?.accountId || '';
+  const currentId = state.auth.activeAccountId || state.profile.accountId || sessionId;
+  const source = currentId ? (findAccountById(currentId) || (state.members || []).find(m => m.accountId === currentId || m.id === currentId) || session) : null;
+  if (source?.accountId || source?.id) {
+    const accountId = source.accountId || source.id;
+    state.auth.activeAccountId = accountId;
+    state.profile.accountId = accountId;
+    state.profile.name = source.name || state.profile.name || '';
+    state.profile.username = source.username || state.profile.username || '';
+    state.profile.role = source.role || state.profile.role || 'สายคอนเทนต์';
+    state.profile.color = source.color || state.profile.color || '#0f6b5e';
+    state.profile.isAdmin = Boolean(source.isAdmin);
     state.profile.createdAt ||= source.createdAt || session?.savedAt || new Date().toISOString();
+    saveAccountSession({ ...source, id: accountId, accountId });
+  } else {
+    state.auth.activeAccountId = '';
   }
-  if (state.profile.accountId && state.profile.name) {
-    saveAccountSession({ ...state.profile, id: state.profile.accountId });
-  }
-  // UI state from older versions must never force account modal on reload.
   state.accountModalOpen = false;
   persist();
 }
 
 function currentAccountId() {
-  if (!state.profile.accountId) {
-    state.profile.accountId = uid('acct');
-    state.profile.createdAt ||= new Date().toISOString();
-    persist();
-  }
-  return state.profile.accountId;
+  return state.auth?.activeAccountId || state.profile?.accountId || '';
 }
 
 function currentUserName() {
-  return state.profile.name || state.members[0]?.name || 'เพื่อน';
+  const account = activeAccount();
+  return state.profile.name || account?.name || state.members[0]?.name || 'เพื่อน';
 }
 
 function currentUserRoleLabel() {
-  return state.profile.isAdmin ? 'Admin' : 'Member';
+  const account = activeAccount();
+  return (state.profile.isAdmin || account?.isAdmin) ? 'Admin' : 'Member';
 }
 
 function currentUserBadge() {
-  return state.profile.isAdmin ? '👑 Admin' : '🙋 Member';
+  const account = activeAccount();
+  return (state.profile.isAdmin || account?.isAdmin) ? '👑 Admin' : '🙋 Member';
 }
 
 function isActiveItem(item) {
@@ -131,7 +258,7 @@ function activeList(key) {
 function currentActorMeta() {
   return {
     author: currentUserName(),
-    accountId: currentAccountId()
+    accountId: currentAccountId() || uid('guest')
   };
 }
 
@@ -164,22 +291,39 @@ function ensureMomentActive(momentId) {
 }
 
 function ensureProfileAccount() {
-  currentAccountId();
-  const now = new Date().toISOString();
-  const account = {
-    id: state.profile.accountId,
-    name: currentUserName(),
-    role: state.profile.role || 'สายคอนเทนต์',
-    color: state.profile.color || '#0f6b5e',
-    isAdmin: Boolean(state.profile.isAdmin),
-    updatedAt: now,
-    createdAt: state.profile.createdAt || now,
-    storage: 'local'
-  };
   state.accounts ||= [];
-  const index = state.accounts.findIndex(a => a.id === account.id);
-  if (index >= 0) state.accounts[index] = { ...state.accounts[index], ...account };
-  else state.accounts.push(account);
+  let account = activeAccount();
+  const now = new Date().toISOString();
+  if (!account) {
+    const username = normalizeUsername(state.profile.username || state.profile.name || `user${Date.now().toString(36)}`);
+    account = {
+      id: state.profile.accountId || uid('acct'),
+      accountId: state.profile.accountId || '',
+      username,
+      name: state.profile.name || username,
+      role: state.profile.role || 'สายคอนเทนต์',
+      color: state.profile.color || '#0f6b5e',
+      isAdmin: Boolean(state.profile.isAdmin),
+      createdAt: state.profile.createdAt || now,
+      updatedAt: now,
+      storage: 'local'
+    };
+    account.accountId = account.id;
+    state.accounts.push(account);
+    applyAccountToProfile(account);
+  } else {
+    account = {
+      ...account,
+      name: state.profile.name || account.name,
+      role: state.profile.role || account.role || 'สายคอนเทนต์',
+      color: state.profile.color || account.color || '#0f6b5e',
+      isAdmin: Boolean(state.profile.isAdmin),
+      updatedAt: now,
+      storage: account.storage === 'firebase' ? 'local' : account.storage || 'local'
+    };
+    const index = state.accounts.findIndex(a => a.id === account.id);
+    if (index >= 0) state.accounts[index] = account;
+  }
   return account;
 }
 
@@ -334,8 +478,7 @@ function init() {
     if (!document.hidden && drive.connected && state.settings.liveSyncEnabled) syncDrive({ silent: true }).catch(console.warn);
   });
   restoreProfileFromSession();
-  if (!state.profile.accountId) currentAccountId();
-  state.accountModalOpen = !Boolean(state.profile.name);
+  state.accountModalOpen = false;
   render();
   setTimeout(autoConnectFirebaseOnStart, 350);
   setTimeout(autoConnectDriveOnStart, 800);
@@ -433,6 +576,10 @@ function toast(message) {
 }
 
 function render() {
+  if (!isAuthenticated()) {
+    app.innerHTML = renderLoginScreen();
+    return;
+  }
   const title = pageTitle(currentPage);
   app.innerHTML = `
     <div class="shell">
@@ -456,7 +603,7 @@ function render() {
           </div>
           <div class="action-row">
             <button class="btn ghost" data-action="open-account">${currentUserBadge()}</button><button class="btn accent" data-action="quick-moment">＋ เพิ่มโมเมนต์</button>
-            <button class="btn" data-action="sync-drive">☁️ Sync Hub</button>
+            <button class="btn" data-action="sync-drive">↻ อัปเดตข้อมูล</button>
           </div>
         </div>
         ${renderPage()}
@@ -468,6 +615,40 @@ function render() {
     ${state.accountModalOpen ? renderAccountModal() : ''}
   `;
   hydrateMediaInDOM();
+}
+
+
+function renderLoginScreen() {
+  const hasAdmin = (state.accounts || []).some(account => isActiveItem(account) && account.isAdmin);
+  const users = activeList('accounts').filter(account => !account.isAdmin).slice(0, 6);
+  return `
+    <main class="login-page">
+      <section class="login-hero card">
+        <div class="app-logo">📖</div>
+        <h1>กาญนะจ๊ะบุรีทริป</h1>
+        <p>เข้าสู่ระบบเพื่อแชร์โมเมนต์ เช็กอิน เล่นเกม และเก็บความทรงจำร่วมกับเพื่อน</p>
+      </section>
+      <section class="login-grid">
+        <form class="login-card card" data-form="admin-login">
+          <div class="login-card-head"><span>👑</span><div><h2>Admin</h2><p>${hasAdmin ? 'เข้าสู่ระบบผู้ดูแล' : 'ครั้งแรกใช้รหัส 1234'}</p></div></div>
+          <div class="field"><label>Username</label><input class="input" name="username" value="admin" autocomplete="username" required /></div>
+          <div class="field"><label>Password</label><input class="input" name="password" type="password" inputmode="numeric" autocomplete="current-password" placeholder="รหัสผ่าน" required /></div>
+          <button class="btn primary full" type="submit">เข้าสู่ระบบ Admin</button>
+        </form>
+        <form class="login-card card" data-form="member-login">
+          <div class="login-card-head"><span>🙋</span><div><h2>Member</h2><p>ถ้ายังไม่มีบัญชี ระบบจะสร้างให้จาก username/password นี้</p></div></div>
+          <div class="field"><label>Username</label><input class="input" name="username" autocomplete="username" placeholder="เช่น ton" required /></div>
+          <div class="field"><label>Password</label><input class="input" name="password" type="password" autocomplete="current-password" placeholder="อย่างน้อย 4 ตัว" required /></div>
+          <div class="grid two compact-fields">
+            <div class="field"><label>ชื่อที่แสดง</label><input class="input" name="name" placeholder="เช่น ต้น" /></div>
+            <div class="field"><label>คาแรกเตอร์</label><select class="select" name="role">${['สายคอนเทนต์','สายฮา','สายกิน','สายหลับ','สายเปย์','สายไกด์','สายถ่ายรูป','สายดูแลเพื่อน'].map(x => `<option>${x}</option>`).join('')}</select></div>
+          </div>
+          <button class="btn accent full" type="submit">เข้าใช้งาน / สร้างบัญชี</button>
+          ${users.length ? `<div class="known-users">${users.map(u => `<span>${escapeHtml(u.name || u.username)}</span>`).join('')}</div>` : ''}
+        </form>
+      </section>
+    </main>
+  `;
 }
 
 function renderNav() {
@@ -489,11 +670,11 @@ function renderMobileNav() {
 function pageTitle(page) {
   return {
     home: { icon: '🏕️', name: 'วันนี้ทำไรดี', desc: 'แดชบอร์ดทริป ภารกิจ คะแนน และปุ่มเริ่มตำนาน' },
-    feed: { icon: '📸', name: 'Memory Feed', desc: 'ทุกคนอัปเดตโมเมนต์ เช็กอิน รูป วิดีโอ และ Quote ได้ที่นี่' },
+    feed: { icon: '📸', name: 'Memory Feed', desc: 'โพสต์รูป เช็กอิน คอมเมนต์ และแชร์โมเมนต์ร่วมกัน' },
     quest: { icon: '🧭', name: 'ภารกิจแก๊ง', desc: 'ทำเควสต์ ถ่ายคอนเทนต์ เล่นน้ำแบบปลอดภัย และเก็บ XP' },
     games: { icon: '🎲', name: 'เกมบนแพ', desc: 'Most Likely, Truth or Mission, Trip Bingo, Secret Buddy และ Caption Battle' },
     recap: { icon: '🎞️', name: 'สมุดความทรงจำ', desc: 'นำเสนอโมเมนต์รวมแบบ Reel/สไลด์ และสร้าง Recap หลังจบทริป' },
-    tools: { icon: '🧰', name: 'ตั้งค่าและเครื่องมือ', desc: 'Google Drive Sync, สมาชิก, หารค่าใช้จ่าย, Checklist และ Backup' }
+    tools: { icon: '🧰', name: 'ตั้งค่าและเครื่องมือ', desc: 'บัญชี สมาชิก ค่าใช้จ่าย Checklist และ Backup' }
   }[page];
 }
 
@@ -586,13 +767,11 @@ function renderFeed() {
 
       <div class="feed-toolbar glass pad">
         <div>
-          <h3>กาญนะจ๊ะบุรี Social</h3>
-          <p class="muted-light">IG-style private feed ของทริป: Stories, Album post, caption, comment, reaction คนละ 1 ครั้ง และ Vlog save</p>
+          <h3>Memory Feed</h3>
+          <p class="muted-light">พื้นที่ลงรูป เช็กอิน คอมเมนต์ และเก็บโมเมนต์เด่นของแก๊ง</p>
         </div>
         <div class="action-row">
           <button class="btn accent" data-action="open-composer">＋ เพิ่มโมเมนต์</button>
-          <button class="btn" data-action="connect-firebase">⚡ Connect Firebase</button>
-          <button class="btn" data-action="connect-drive">☁️ Connect Drive</button>
         </div>
       </div>
 
@@ -618,7 +797,7 @@ function renderMomentCard(moment) {
   const mediaHtml = renderAlbumMedia(mediaList, moment.id);
   const reactions = uniqueActiveReactions((state.reactions || []).filter(r => r.momentId === moment.id));
   const reactionText = reactionSummary(reactions);
-  const albumText = mediaList.length ? `${mediaList.length} ไฟล์ · original full resolution` : 'text post';
+  const albumText = mediaList.length ? `${mediaList.length} ไฟล์ · รูป/วิดีโอต้นฉบับ` : 'โพสต์ข้อความ';
   const canDelete = canManageItem(moment);
   return `
     <article class="card moment-card insta-card">
@@ -641,6 +820,7 @@ function renderMomentCard(moment) {
         </div>
         ${reactionText ? `<p class="like-line"><b>${reactionText}</b> <span class="muted">· ${reactions.length} reaction</span></p>` : ''}
         <p class="caption-line"><b>${escapeHtml(moment.author || 'เพื่อน')}</b> ${escapeHtml(moment.caption || 'Untitled Moment')}</p>
+        ${moment.gps ? `<a class="gps-link" href="https://www.google.com/maps?q=${encodeURIComponent(moment.gps.lat + ',' + moment.gps.lng)}" target="_blank" rel="noreferrer">📍 ดูตำแหน่งเช็กอิน</a>` : ''}
         <p class="small muted">${escapeHtml(albumText)} ${moment.featured ? '· อยู่ใน Vlog Studio' : ''}</p>
         ${renderComments(moment.id)}
       </div>
@@ -709,29 +889,39 @@ function renderMedia(media) {
 
 function renderAccountModal() {
   const accountId = currentAccountId();
+  const account = activeAccount() || {};
   return `
     <div class="modal-backdrop" data-action="close-account">
       <div class="composer-modal card account-modal" data-modal-panel role="dialog" aria-modal="true" aria-label="บัญชีของฉัน" tabindex="-1">
         <div class="composer-head">
           <div>
             <h3>บัญชีของฉัน</h3>
-            <p class="muted">ทุกคนมีบัญชีแยกกัน ใช้สำหรับโพสต์ คอมเมนต์ และจำกัด reaction คนละ 1 ครั้งต่อโมเมนต์</p>
+            <p class="muted">แก้ชื่อ โปรไฟล์ และรหัสผ่านของบัญชีนี้</p>
           </div>
           <button class="icon-btn" type="button" data-action="close-account" aria-label="ปิดหน้าบัญชี">✕</button>
         </div>
         <form class="stack" data-form="profile">
           <div class="profile-card-preview">
             <span class="avatar big" style="background:${escapeAttr(state.profile.color || '#0f6b5e')}">${escapeHtml(initials(currentUserName()))}</span>
-            <div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · ID ${escapeHtml(accountId.slice(-8))}</p></div>
+            <div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · @${escapeHtml(account.username || '')}</p></div>
           </div>
           <div class="grid two">
-            <div class="field"><label>ชื่อบัญชี / ชื่อเล่น</label><input class="input" name="name" required value="${escapeAttr(state.profile.name || '')}" placeholder="เช่น ต้น" /></div>
+            <div class="field"><label>ชื่อที่แสดง</label><input class="input" name="name" required value="${escapeAttr(state.profile.name || '')}" placeholder="เช่น ต้น" /></div>
+            <div class="field"><label>Username</label><input class="input" name="username" value="${escapeAttr(account.username || state.profile.username || '')}" readonly /></div>
             <div class="field"><label>คาแรกเตอร์</label><select class="select" name="role">${['สายคอนเทนต์','สายฮา','สายกิน','สายหลับ','สายเปย์','สายไกด์','สายถ่ายรูป','สายดูแลเพื่อน'].map(x => `<option ${state.profile.role === x ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
             <div class="field"><label>สีประจำตัว</label><input class="input" name="color" type="color" value="${escapeAttr(state.profile.color || '#0f6b5e')}" /></div>
-            <div class="field"><label>สิทธิ์</label><select class="select" name="isAdmin"><option value="false" ${!state.profile.isAdmin ? 'selected' : ''}>Member</option><option value="true" ${state.profile.isAdmin ? 'selected' : ''}>Admin</option></select></div>
           </div>
-          <div class="social-note"><b>Admin Drive Hub:</b> Admin สามารถเผยแพร่ Drive Client ID + Folder ID ผ่าน Firebase ให้ทุกคนรับค่าอัตโนมัติได้ แต่ Google ไม่อนุญาตให้แชร์ OAuth token ของ Admin ไปยังเครื่องเพื่อนแบบปลอดภัย ถ้าจะอัปโหลดเข้า Drive โดยตรง ผู้ใช้ยังต้อง authorize Google บนเครื่องตัวเองหรือใช้ Firebase Storage/Cloud Functions เพิ่ม</div>
-          <button class="btn primary full" type="submit">บันทึกบัญชี</button>
+          <div class="password-box">
+            <b>เปลี่ยนรหัสผ่าน</b>
+            <div class="grid two">
+              <div class="field"><label>รหัสปัจจุบัน</label><input class="input" name="currentPassword" type="password" autocomplete="current-password" placeholder="เว้นว่างถ้าไม่เปลี่ยน" /></div>
+              <div class="field"><label>รหัสใหม่</label><input class="input" name="newPassword" type="password" autocomplete="new-password" placeholder="อย่างน้อย 4 ตัว" /></div>
+            </div>
+          </div>
+          <div class="action-row">
+            <button class="btn primary" type="submit">บันทึกบัญชี</button>
+            <button class="btn ghost" type="button" data-action="logout">ออกจากระบบ</button>
+          </div>
         </form>
       </div>
     </div>
@@ -747,7 +937,7 @@ function renderComposerModal() {
         <div class="composer-head">
           <div>
             <h3>${isGame ? 'โพสต์โมเมนต์จากเกม' : isQuest ? 'โพสต์หลักฐานภารกิจ' : 'สร้างโพสต์ใหม่'}</h3>
-            <p class="muted">อัปโหลดรูป/วิดีโอได้ทั้งอัลบั้ม เก็บไฟล์ต้นฉบับเต็มความละเอียดใน Google Drive และส่งโพสต์เข้า Firebase Feed</p>
+            <p class="muted">อัปโหลดรูป/วิดีโอได้ทั้งอัลบั้ม พร้อมแคปชันและเช็กอิน</p>
           </div>
           <button class="icon-btn" type="button" data-action="close-composer" aria-label="ปิดหน้าเพิ่มโมเมนต์">✕</button>
         </div>
@@ -778,8 +968,15 @@ function renderComposerModal() {
               </select>
             </div>
           </div>
+          <div class="gps-card">
+            <input type="hidden" name="gpsLat" value="${escapeAttr(composer.gps?.lat || '')}" />
+            <input type="hidden" name="gpsLng" value="${escapeAttr(composer.gps?.lng || '')}" />
+            <input type="hidden" name="gpsAccuracy" value="${escapeAttr(composer.gps?.accuracy || '')}" />
+            <div><b>📍 GPS Check-in</b><p>${composer.gps ? `เพิ่มพิกัดแล้ว · ${Number(composer.gps.lat).toFixed(5)}, ${Number(composer.gps.lng).toFixed(5)}` : 'แตะเพื่อเพิ่มตำแหน่งปัจจุบันในโพสต์นี้'}</p></div>
+            <button class="btn ghost" type="button" data-action="capture-gps">เพิ่ม GPS</button>
+          </div>
           <div class="field"><label>รูป/วิดีโอทั้งอัลบั้ม</label><input class="input" name="media" type="file" accept="image/*,video/*" multiple /></div>
-          <div class="composer-tip">ไฟล์สื่อจะถูกเก็บใน Google Drive แบบเต็มความละเอียด ไม่บีบอัด ส่วนข้อมูลโพสต์/คอมเมนต์/รีแอคจะเข้า Firebase เพื่อให้ Feed อัปเดตเร็วแบบโซเชียล</div>
+          <div class="composer-tip">รูป/วิดีโอจะถูกเก็บแบบเต็มความละเอียด ไม่บีบอัด</div>
           <button class="btn primary full" type="submit">แชร์ลง Feed</button>
         </form>
       </div>
@@ -933,14 +1130,12 @@ function renderTools() {
   return `
     <section class="grid two">
       <div class="card pad stack">
-        <h3>⚡ Social Hub: Firebase + Google Drive</h3>
+        <h3>⚙️ ตั้งค่าทริป</h3>
         <div class="profile-card-preview compact"><span class="avatar" style="background:${escapeAttr(state.profile.color || '#0f6b5e')}">${escapeHtml(initials(currentUserName()))}</span><div><b>${escapeHtml(currentUserName())}</b><p>${currentUserBadge()} · ${state.settings.adminDriveOwner ? 'Drive โดย Admin: ' + escapeHtml(state.settings.adminDriveOwner) : 'ยังไม่มี Admin Drive Hub'}</p></div><button class="btn ghost" data-action="open-account">แก้บัญชี</button></div>
-        <p class="muted">Firebase ใช้เป็นฐานข้อมูล realtime สำหรับ Feed/Comment/Reaction ส่วน Google Drive ใช้เป็นคลังรูปและวิดีโอต้นฉบับเต็มความละเอียด</p>
         <form class="stack" data-form="settings">
           <div class="firebase-panel">
-            <h3>⚡ Firebase Live Feed</h3>
-            <p class="muted">ใช้ Firestore เป็นฐานข้อมูลเร็วแบบ realtime สำหรับ Feed, Comment, Reaction, Vote และ Game ส่วน Google Drive ใช้เก็บรูป/วิดีโอต้นฉบับเต็มความละเอียด</p>
-            <label class="checkline"><input type="checkbox" name="firebaseEnabled" ${state.settings.firebaseEnabled ? 'checked' : ''}> ใช้ Firebase เป็น Social Feed หลัก</label>
+            <h3>การแชร์ข้อมูลร่วมกัน</h3>
+            <label class="checkline"><input type="checkbox" name="firebaseEnabled" ${state.settings.firebaseEnabled ? 'checked' : ''}> เปิดการแชร์ Feed แบบเรียลไทม์</label>
             <div class="grid two">
               <div class="field"><label>Trip ID</label><input class="input" name="firebaseTripId" value="${escapeAttr(state.settings.firebaseTripId || 'kannajaburi-trip')}" placeholder="kannajaburi-trip" /></div>
               <div class="field"><label>Project ID</label><input class="input" name="firebaseProjectId" value="${escapeAttr(state.settings.firebaseProjectId || '')}" placeholder="your-project-id" /></div>
@@ -954,25 +1149,23 @@ function renderTools() {
           <div class="field"><label>Google OAuth Client ID</label><input class="input" name="driveClientId" value="${escapeAttr(state.settings.driveClientId)}" placeholder="xxxxx.apps.googleusercontent.com" /></div>
           <div class="field"><label>Trip Drive Folder ID หรือ URL โฟลเดอร์</label><input class="input" name="driveRootFolderId" value="${escapeAttr(state.settings.driveRootFolderId)}" placeholder="https://drive.google.com/drive/folders/..." /></div>
           <div class="field"><label>ชื่อโฟลเดอร์ถ้าจะให้แอพสร้างใหม่</label><input class="input" name="driveRootFolderName" value="${escapeAttr(state.settings.driveRootFolderName)}" /></div>
-          <label class="checkline"><input type="checkbox" name="autoSyncOnStart" ${state.settings.autoSyncOnStart ? 'checked' : ''}> Auto sync ตอนเปิดแอพ</label>
-          <label class="checkline"><input type="checkbox" name="liveSyncEnabled" ${state.settings.liveSyncEnabled ? 'checked' : ''}> Social live sync เมื่อเปิดแอพอยู่</label>
-          <label class="checkline"><input type="checkbox" name="driveManagedByAdmin" ${state.settings.driveManagedByAdmin !== false ? 'checked' : ''}> รับค่า Drive Hub จาก Admin อัตโนมัติผ่าน Firebase</label>
+          <label class="checkline"><input type="checkbox" name="autoSyncOnStart" ${state.settings.autoSyncOnStart ? 'checked' : ''}> อัปเดตข้อมูลตอนเปิดแอพ</label>
+          <label class="checkline"><input type="checkbox" name="liveSyncEnabled" ${state.settings.liveSyncEnabled ? 'checked' : ''}> อัปเดตข้อมูลระหว่างใช้งาน</label>
+          <label class="checkline"><input type="checkbox" name="driveManagedByAdmin" ${state.settings.driveManagedByAdmin !== false ? 'checked' : ''}> รับค่าพื้นที่รูปจาก Admin อัตโนมัติ</label>
           <div class="field"><label>ความถี่ Auto Sync (วินาที)</label><input class="input" name="syncIntervalSec" type="number" min="15" max="120" value="${Number(state.settings.syncIntervalSec || 20)}" /></div>
-          <label class="checkline"><input type="checkbox" name="useIncrementalSync" ${state.settings.useIncrementalSync !== false ? 'checked' : ''}> ใช้ Incremental sync เพื่อลดการโหลดซ้ำ</label>
+          <label class="checkline"><input type="checkbox" name="useIncrementalSync" ${state.settings.useIncrementalSync !== false ? 'checked' : ''}> โหลดเฉพาะข้อมูลใหม่</label>
           <button class="btn primary" type="submit">บันทึกการตั้งค่า</button>
         </form>
         <div class="grid two">
-          <button class="btn accent" data-action="connect-firebase">เชื่อมต่อ Firebase</button>
-          <button class="btn" data-action="push-firebase">ส่ง Pending เข้า Firebase</button>
-          <button class="btn accent" data-action="connect-drive">เชื่อมต่อ Drive</button>
-          <button class="btn primary" data-action="publish-admin-drive">👑 Admin: แชร์ Drive Hub ให้ทุกคน</button>
-          <button class="btn" data-action="create-drive-folder">สร้างโฟลเดอร์ทริป</button>
-          <button class="btn" data-action="sync-drive">Sync Drive Hub</button>
-          <button class="btn" data-action="full-sync">Full Rebuild Sync</button>
-          <button class="btn" data-action="upload-pending">ส่ง Pending เข้า Hub</button>
+          <button class="btn accent" data-action="connect-firebase">เชื่อมต่อข้อมูล</button>
+          <button class="btn" data-action="push-firebase">ส่งข้อมูลที่รออยู่</button>
+          <button class="btn accent" data-action="connect-drive">เชื่อมต่อพื้นที่รูป</button>
+          <button class="btn primary" data-action="publish-admin-drive">👑 แชร์พื้นที่รูปให้ทุกคน</button>
+          <button class="btn" data-action="create-drive-folder">สร้างโฟลเดอร์รูปทริป</button>
+          <button class="btn" data-action="sync-drive">อัปเดตพื้นที่รูป</button>
+          <button class="btn" data-action="full-sync">โหลดข้อมูลใหม่ทั้งหมด</button>
+          <button class="btn" data-action="upload-pending">ส่งรูป/ข้อมูลที่รออยู่</button>
         </div>
-        <div class="social-note"><b>โหมดแนะนำ:</b> Firebase-first + Drive Media ใช้งานคล้ายโซเชียลมากที่สุด: Firestore realtime สำหรับ Feed, Google Drive สำหรับรูปเต็มความละเอียด</div>
-        <div class="code">Firebase: ${firebase.connected ? 'Connected' : 'Not connected'}<br>Drive: ${drive.connected ? 'Connected' : 'Not connected'}<br>Folder: ${escapeHtml(state.settings.driveRootFolderId || '-')}<br>${escapeHtml(syncSummary())}</div>
       </div>
 
       <div class="card pad stack">
@@ -1122,7 +1315,7 @@ function openQuestComposer(id) {
 }
 
 function closeComposer() {
-  composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '' };
+  composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '', gps: null };
   render();
 }
 
@@ -1150,6 +1343,8 @@ async function onClick(event) {
 
   try {
     if (action === 'quick-moment' || action === 'open-composer') return openComposer(btn.dataset);
+    if (action === 'logout') return logoutAccount();
+    if (action === 'capture-gps') return captureGpsForComposer();
     if (action === 'open-account') { state.accountModalOpen = true; render(); return; }
     if (action === 'close-account') { state.accountModalOpen = false; persist(); render(); return; }
     if (action === 'close-composer') return closeComposer();
@@ -1204,6 +1399,8 @@ async function onSubmit(event) {
   event.preventDefault();
   const type = form.dataset.form;
   try {
+    if (type === 'admin-login') return loginAdmin(new FormData(form));
+    if (type === 'member-login') return loginMember(new FormData(form));
     if (type === 'profile') return saveProfile(new FormData(form));
     if (type === 'member') return addMember(new FormData(form), form);
     if (type === 'moment') return addMoment(new FormData(form), form);
@@ -1234,36 +1431,111 @@ async function onChange(event) {
 }
 
 
+async function loginAdmin(data) {
+  const username = normalizeUsername(data.get('username') || DEFAULT_ADMIN_USERNAME);
+  const password = String(data.get('password') || '');
+  if (username !== DEFAULT_ADMIN_USERNAME) throw new Error('Admin username ต้องเป็น admin');
+  let admin = (state.accounts || []).find(a => isActiveItem(a) && a.isAdmin && normalizeUsername(a.username || a.name) === DEFAULT_ADMIN_USERNAME);
+  if (!admin) {
+    if (password !== DEFAULT_ADMIN_PASSWORD) throw new Error('รหัส Admin เริ่มต้นไม่ถูกต้อง');
+    admin = await createAccount({
+      username: DEFAULT_ADMIN_USERNAME,
+      password: DEFAULT_ADMIN_PASSWORD,
+      name: 'Admin',
+      role: 'ผู้ดูแลทริป',
+      color: '#111827',
+      isAdmin: true,
+      mustChangePassword: true
+    });
+  } else {
+    const ok = await verifyAccountPassword(admin, password);
+    if (!ok) throw new Error('รหัสผ่าน Admin ไม่ถูกต้อง');
+  }
+  applyAccountToProfile(admin);
+  ensureMemberForAccount(admin);
+  persist();
+  toast(admin.mustChangePassword ? 'เข้าสู่ระบบ Admin แล้ว แนะนำให้เปลี่ยนรหัสผ่าน' : 'เข้าสู่ระบบ Admin แล้ว');
+  render();
+  setTimeout(autoConnectFirebaseOnStart, 250);
+  setTimeout(autoConnectDriveOnStart, 600);
+}
+
+async function loginMember(data) {
+  const username = normalizeUsername(data.get('username') || '');
+  const password = String(data.get('password') || '');
+  let account = findAccountByUsername(username);
+  if (account) {
+    const ok = await verifyAccountPassword(account, password);
+    if (!ok) throw new Error('รหัสผ่านไม่ถูกต้อง');
+  } else {
+    account = await createAccount({
+      username,
+      password,
+      name: String(data.get('name') || username).trim(),
+      role: String(data.get('role') || 'สายคอนเทนต์'),
+      color: '#0f6b5e',
+      isAdmin: false
+    });
+  }
+  applyAccountToProfile(account);
+  ensureMemberForAccount(account);
+  persist();
+  toast(`เข้าสู่ระบบแล้ว: ${account.name || account.username}`);
+  render();
+  setTimeout(autoConnectFirebaseOnStart, 250);
+  setTimeout(autoConnectDriveOnStart, 600);
+}
+
+async function captureGpsForComposer() {
+  if (!navigator.geolocation) return toast('เครื่องนี้ไม่รองรับ GPS');
+  toast('กำลังขอตำแหน่ง GPS…');
+  navigator.geolocation.getCurrentPosition(position => {
+    composer.gps = {
+      lat: Number(position.coords.latitude),
+      lng: Number(position.coords.longitude),
+      accuracy: Math.round(Number(position.coords.accuracy || 0)),
+      capturedAt: new Date().toISOString()
+    };
+    if (!composer.place) composer.place = 'ตำแหน่งปัจจุบัน';
+    toast('เพิ่ม GPS ในโพสต์แล้ว');
+    render();
+  }, error => {
+    toast(error.message || 'ไม่สามารถดึง GPS ได้');
+  }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 });
+}
+
 async function saveProfile(data) {
   const now = new Date().toISOString();
-  state.profile.accountId ||= uid('acct');
-  state.profile.name = String(data.get('name') || '').trim();
-  state.profile.role = String(data.get('role') || 'สายคอนเทนต์');
-  state.profile.color = String(data.get('color') || '#0f6b5e');
-  state.profile.isAdmin = String(data.get('isAdmin')) === 'true';
-  state.profile.createdAt ||= now;
-  const account = ensureProfileAccount();
-  state.members ||= [];
-  const member = {
-    id: account.id,
-    accountId: account.id,
-    name: account.name,
-    role: account.role,
-    color: account.color,
-    isAdmin: account.isAdmin,
-    createdAt: account.createdAt,
-    updatedAt: now,
-    storage: 'local'
-  };
-  const memberIndex = state.members.findIndex(m => m.accountId === account.id || m.id === account.id || m.name === member.name);
-  if (memberIndex >= 0) state.members[memberIndex] = { ...state.members[memberIndex], ...member };
-  else state.members.push(member);
+  const account = activeAccount();
+  if (!account) throw new Error('กรุณาเข้าสู่ระบบใหม่');
+  const currentPassword = String(data.get('currentPassword') || '');
+  const newPassword = String(data.get('newPassword') || '');
+  if (newPassword) {
+    if (newPassword.length < 4) throw new Error('รหัสใหม่ต้องมีอย่างน้อย 4 ตัว');
+    const ok = await verifyAccountPassword(account, currentPassword);
+    if (!ok) throw new Error('รหัสปัจจุบันไม่ถูกต้อง');
+    account.passwordHash = await passwordHash(account.username || account.name, newPassword);
+    account.mustChangePassword = false;
+  }
+  account.name = String(data.get('name') || '').trim();
+  account.role = String(data.get('role') || 'สายคอนเทนต์');
+  account.color = String(data.get('color') || '#0f6b5e');
+  account.updatedAt = now;
+  account.storage = account.storage === 'firebase' ? 'local' : account.storage || 'local';
+  state.profile.name = account.name;
+  state.profile.username = account.username;
+  state.profile.role = account.role;
+  state.profile.color = account.color;
+  state.profile.isAdmin = Boolean(account.isAdmin);
+  const index = state.accounts.findIndex(a => a.id === account.id);
+  if (index >= 0) state.accounts[index] = account;
+  const member = ensureMemberForAccount(account);
   state.accountModalOpen = false;
-  saveAccountSession({ ...account, accountId: account.id });
+  saveAccountSession(account);
   persist();
   render();
-  toast('บันทึกบัญชีแล้ว');
-  Promise.all([uploadRecordIfConnected('accounts', account), uploadRecordIfConnected('members', member)])
+  toast(newPassword ? 'บันทึกบัญชีและเปลี่ยนรหัสแล้ว' : 'บันทึกบัญชีแล้ว');
+  Promise.all([uploadRecordIfConnected('accounts', account), member ? uploadRecordIfConnected('members', member) : Promise.resolve()])
     .then(() => { persist(); renderSyncStatusOnly(); })
     .catch(error => {
       console.warn('Account saved locally; sync will retry later:', error);
@@ -1312,6 +1584,12 @@ async function addMoment(data, form) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     media: [],
+    gps: data.get('gpsLat') ? {
+      lat: Number(data.get('gpsLat')),
+      lng: Number(data.get('gpsLng')),
+      accuracy: Number(data.get('gpsAccuracy') || 0),
+      capturedAt: composer.gps?.capturedAt || new Date().toISOString()
+    } : null,
     storage: 'local'
   };
 
@@ -1512,6 +1790,12 @@ async function addVote(data, form) {
     createdAt: now,
     updatedAt: now,
     media: [],
+    gps: data.get('gpsLat') ? {
+      lat: Number(data.get('gpsLat')),
+      lng: Number(data.get('gpsLng')),
+      accuracy: Number(data.get('gpsAccuracy') || 0),
+      capturedAt: composer.gps?.capturedAt || new Date().toISOString()
+    } : null,
     storage: 'local'
   };
   vote.momentId = moment.id;
@@ -1858,7 +2142,7 @@ async function uploadPendingSocialRecords(options = {}) {
   const count = await firebase.uploadBatch(data);
   for (const records of Object.values(data)) for (const item of records) item.storage = 'firebase';
   persist();
-  if (!silent) toast(count ? `ส่ง Pending เข้า Firebase ${count} รายการแล้ว` : 'ไม่มี Pending สำหรับ Firebase');
+  if (!silent) toast(count ? `ส่งข้อมูลที่รออยู่ ${count} รายการแล้ว` : 'ไม่มี Pending สำหรับ Firebase');
   render();
   return count;
 }
@@ -2265,9 +2549,9 @@ async function installApp() {
 
 function resetLocal() {
   if (!confirm('ล้างข้อมูล Local ในเครื่องนี้? ข้อมูลบน Firebase/Google Drive จะไม่ถูกลบ')) return;
-  ['kannajaburi-trip-state-v9','kannajaburi-trip-state-v8','kannajaburi-trip-state-v7','kannajaburi-trip-state-v6','kannajaburi-trip-state-v5','kannajaburi-trip-state-v4','kannajaburi-trip-state-v3', ACCOUNT_SESSION_KEY].forEach(key => localStorage.removeItem(key));
+  ['kannajaburi-trip-state-v10','kannajaburi-trip-state-v9','kannajaburi-trip-state-v8','kannajaburi-trip-state-v7','kannajaburi-trip-state-v6','kannajaburi-trip-state-v5','kannajaburi-trip-state-v4','kannajaburi-trip-state-v3', ACCOUNT_SESSION_KEY].forEach(key => localStorage.removeItem(key));
   state = loadState();
-  state.accountModalOpen = true;
+  state.accountModalOpen = false;
   toast('ล้างข้อมูล Local แล้ว');
   render();
 }
