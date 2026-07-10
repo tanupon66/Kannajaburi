@@ -1,7 +1,7 @@
 {
   "name": "กาญนะจ๊ะบุรีทริป",
   "short_name": "กาญทริป",
-  "description": "กาญนะจ๊ะบุรีทริป PWA แบบ Social Memory App: Feed, Accounts, Games, Quest, Vote, Expense, ระบบบัญชี Admin/Member, รูปโปรไฟล์, IG Story, Admin-only Hub, Check-in GPS และแชร์รูปเต็มความละเอียด",
+  "description": "กาญนะจ๊ะบุรีทริป PWA แบบ Social Memory App: Feed, Accounts, Games, Quest, Vote, Expense, ระบบบัญชี Admin/Member, รูปโปรไฟล์, IG Story, Admin-only Hub, Check-in GPS และแชร์รูปเต็มความละเอียด พร้อมระบบอัปโหลด Drive ที่เสถียรขึ้น",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
