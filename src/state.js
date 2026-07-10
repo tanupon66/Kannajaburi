@@ -1,9 +1,9 @@
-export const STORAGE_KEY = 'kannajaburi-trip-state-v14';
-export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v13';
-export const OLD_STORAGE_KEYS = ['kannajaburi-trip-state-v12','kannajaburi-trip-state-v11','kannajaburi-trip-state-v10','kannajaburi-trip-state-v9','kannajaburi-trip-state-v8','kannajaburi-trip-state-v7','kannajaburi-trip-state-v6'];
+export const STORAGE_KEY = 'kannajaburi-trip-state-v15';
+export const LEGACY_STORAGE_KEY = 'kannajaburi-trip-state-v14';
+export const OLD_STORAGE_KEYS = ['kannajaburi-trip-state-v13','kannajaburi-trip-state-v12','kannajaburi-trip-state-v11','kannajaburi-trip-state-v10','kannajaburi-trip-state-v9','kannajaburi-trip-state-v8','kannajaburi-trip-state-v7','kannajaburi-trip-state-v6'];
 
 export const DEFAULT_STATE = {
-  schema: 14,
+  schema: 15,
   appName: 'กาญนะจ๊ะบุรีทริป',
   trip: {
     title: 'กาญนะจ๊ะบุรีทริป',
@@ -70,7 +70,9 @@ export const DEFAULT_STATE = {
     installPromptDismissed: false,
     adminDriveOwner: '',
     adminDriveSharedAt: '',
-    driveManagedByAdmin: true
+    driveManagedByAdmin: true,
+    driveConsentGranted: false,
+    driveSessionRemember: true
   }
 };
 

@@ -25,6 +25,10 @@ let currentGameDeck = 'most';
 let reel = { open: false, index: 0, timer: null };
 let storyViewer = { open: false, id: '', index: 0, timer: null };
 let composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '', gps: null };
+let composerFiles = [];
+let composerPreviewUrls = [];
+let pendingRenderAfterModal = false;
+let remoteRenderTimer = null;
 let syncTimer = null;
 let isSyncing = false;
 let syncStatus = { text: 'Local cache ready', tone: 'idle' };
@@ -648,6 +652,7 @@ function init() {
   });
   document.addEventListener('click', onClick, true);
   document.addEventListener('submit', onSubmit);
+  document.addEventListener('input', onInput);
   document.addEventListener('change', onChange);
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('visibilitychange', () => {
@@ -664,6 +669,74 @@ function init() {
 
 function persist() {
   saveState(state);
+}
+
+
+function isModalEditing() {
+  return Boolean(composer.open || state.accountModalOpen || reel.open || storyViewer.open);
+}
+
+function renderRemoteUpdate() {
+  if (isModalEditing()) {
+    pendingRenderAfterModal = true;
+    renderSyncStatusOnly();
+    return;
+  }
+  clearTimeout(remoteRenderTimer);
+  remoteRenderTimer = setTimeout(() => {
+    if (isModalEditing()) {
+      pendingRenderAfterModal = true;
+      renderSyncStatusOnly();
+      return;
+    }
+    render();
+  }, 120);
+}
+
+function flushDeferredRender() {
+  if (!pendingRenderAfterModal) return;
+  pendingRenderAfterModal = false;
+  render();
+}
+
+function clearComposerFiles() {
+  for (const url of composerPreviewUrls) {
+    try { URL.revokeObjectURL(url); } catch (error) { console.warn(error); }
+  }
+  composerFiles = [];
+  composerPreviewUrls = [];
+}
+
+function updateComposerDraftFromForm(form) {
+  if (!composer.open || !form) return;
+  const data = new FormData(form);
+  composer.caption = String(data.get('caption') || composer.caption || '');
+  composer.place = String(data.get('place') || composer.place || '');
+  composer.mood = String(data.get('mood') || composer.mood || 'ตำนาน');
+  composer.type = String(data.get('type') || composer.type || 'moment');
+}
+
+function setComposerFiles(files = []) {
+  clearComposerFiles();
+  composerFiles = Array.from(files || []).filter(file => file && file.size);
+  composerPreviewUrls = composerFiles.map(file => URL.createObjectURL(file));
+  renderComposerFilePreview();
+}
+
+function renderComposerFilePreview() {
+  const box = document.querySelector('#composerFilePreview');
+  if (!box) return;
+  if (!composerFiles.length) {
+    box.innerHTML = '<div class="composer-empty-preview">เลือกรูปหรือวิดีโอเพื่อดูตัวอย่างก่อนโพสต์</div>';
+    return;
+  }
+  box.innerHTML = composerFiles.map((file, index) => {
+    const url = composerPreviewUrls[index];
+    const media = file.type.startsWith('video/')
+      ? `<video src="${escapeAttr(url)}" muted playsinline></video>`
+      : `<img src="${escapeAttr(url)}" alt="preview" />`;
+    return `<div class="composer-preview-item">${media}<span>${escapeHtml(file.name || `ไฟล์ ${index + 1}`)}</span></div>`;
+  }).join('');
 }
 
 async function autoConnectFirebaseOnStart() {
@@ -688,7 +761,7 @@ async function autoConnectDriveOnStart() {
   try {
     syncStatus = { text: 'กำลัง Auto sync Drive Hub…', tone: 'info' };
     renderSyncStatusOnly();
-    await drive.authorize({ prompt: '' });
+    if (!drive.connected) await drive.authorize({ prompt: '' });
     startSyncLoop();
     await syncDrive({ silent: true, uploadPendingFirst: true });
   } catch (error) {
@@ -725,6 +798,37 @@ function syncSummary() {
   const live = firebase.connected ? ' · realtime on' : state.settings.liveSyncEnabled ? ` · drive poll ${Number(state.settings.syncIntervalSec || 20)}s` : '';
   const statusText = syncStatus?.text ? ` · ${syncStatus.text}` : '';
   return `${mode}${live} · ${last} · pending ${pending}${statusText}`;
+}
+
+
+function driveMediaReady() {
+  return Boolean(drive.connected && state.settings.driveRootFolderId);
+}
+
+function driveMediaStatusText() {
+  if (!state.settings.driveRootFolderId) return 'ยังไม่ได้ตั้งค่าโฟลเดอร์รูปใน Drive';
+  if (!drive.connected) return 'รอเชื่อมต่อ Google Drive เพื่อส่งไฟล์เต็มความละเอียด';
+  return 'พร้อมอัปโหลดไฟล์เต็มความละเอียดเข้า Drive';
+}
+
+function updatePostUploadStatusInline(moment) {
+  if (!moment?.id || !document?.querySelector) return;
+  try {
+    const post = document.querySelector(`[data-post-id="${cssEscape(moment.id)}"]`);
+    if (!post) return;
+    const slot = post.querySelector('[data-upload-status-slot]');
+    if (!slot) return;
+    const mediaList = Array.isArray(moment.media) ? moment.media : [];
+    const mediaPending = mediaList.some(media => media.pendingUpload || (!media.driveFileId && !media.webViewLink && media.localBlobId));
+    slot.innerHTML = renderPostUploadStatus(moment, moment.uploadState || (mediaPending ? 'pending' : 'local'), mediaPending);
+  } catch (error) {
+    console.warn('Cannot update upload status inline', error);
+  }
+}
+
+function cssEscape(value = '') {
+  if (window.CSS?.escape) return window.CSS.escape(String(value));
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
 }
 
 function renderSyncStatusOnly() {
@@ -793,6 +897,7 @@ function render() {
     ${state.accountModalOpen ? renderAccountModal() : ''}
   `;
   hydrateMediaInDOM();
+  if (composer.open) renderComposerFilePreview();
 }
 
 
@@ -1056,7 +1161,7 @@ function renderMomentCard(moment) {
       </div>
 
       <div class="ig-post-body">
-        ${renderPostUploadStatus(moment, uploadState, mediaPending)}
+        <span data-upload-status-slot>${renderPostUploadStatus(moment, uploadState, mediaPending)}</span>
         ${reactionText ? `<p class="ig-likes"><b>${reactionText}</b> <span>· ${reactions.length} reaction</span></p>` : ''}
         <p class="ig-caption"><b>${escapeHtml(moment.author || 'เพื่อน')}</b> ${escapeHtml(moment.caption || 'Untitled Moment')}</p>
         ${moment.gps ? `<a class="gps-link ig-location" href="https://www.google.com/maps?q=${encodeURIComponent(moment.gps.lat + ',' + moment.gps.lng)}" target="_blank" rel="noreferrer">📍 ดูตำแหน่งเช็กอิน</a>` : ''}
@@ -1074,14 +1179,15 @@ function memberColor(name) {
 }
 
 function renderPostUploadStatus(moment, uploadState, mediaPending) {
+  const message = moment.uploadMessage || '';
   if (uploadState === 'uploading') {
-    return `<div class="post-upload-state uploading"><span class="upload-spinner"></span><b>กำลังอัปโหลดไฟล์เต็มความละเอียด…</b></div>`;
+    return `<div class="post-upload-state uploading" data-upload-status><span class="upload-spinner"></span><div><b>${escapeHtml(message || 'กำลังอัปโหลดไฟล์เต็มความละเอียด…')}</b><small>ห้ามปิดแอพจนกว่าไฟล์จะส่งเสร็จ ถ้าไฟล์ใหญ่หรือหลายรูปอาจใช้เวลาหลายนาที</small></div></div>`;
   }
   if (uploadState === 'error') {
-    return `<div class="post-upload-state error"><span>⚠️</span><b>อัปโหลดไม่สำเร็จ</b><button class="mini-link" data-action="retry-upload-moment" data-id="${escapeAttr(moment.id)}">ลองอีกครั้ง</button></div>`;
+    return `<div class="post-upload-state error" data-upload-status><span>⚠️</span><div><b>อัปโหลดไม่สำเร็จ</b><small>${escapeHtml(message || 'ตรวจว่าเชื่อมต่อ Drive แล้ว และโฟลเดอร์ถูกแชร์เป็น Editor')}</small></div><button class="mini-link" data-action="retry-upload-moment" data-id="${escapeAttr(moment.id)}">ลองอีกครั้ง</button></div>`;
   }
   if (mediaPending) {
-    return `<div class="post-upload-state pending"><span>⏳</span><b>รอส่งไฟล์เต็มขึ้น Hub</b><button class="mini-link" data-action="retry-upload-moment" data-id="${escapeAttr(moment.id)}">ส่งตอนนี้</button></div>`;
+    return `<div class="post-upload-state pending" data-upload-status><span>⏳</span><div><b>${escapeHtml(message || driveMediaStatusText())}</b><small>รูปยังอยู่ในเครื่องนี้ ถ้า Drive ยังว่างให้กดส่งตอนนี้หลังเชื่อมต่อ Google Drive</small></div><button class="mini-link" data-action="retry-upload-moment" data-id="${escapeAttr(moment.id)}">ส่งตอนนี้</button></div>`;
   }
   return '';
 }
@@ -1090,17 +1196,18 @@ function renderComments(momentId) {
   const comments = (state.comments || [])
     .filter(c => c.momentId === momentId && !c.deleted)
     .sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
-  const preview = comments.slice(-6);
-  const moreText = comments.length > preview.length ? `<div class="small muted">มีคอมเมนต์ก่อนหน้าอีก ${comments.length - preview.length} รายการ</div>` : '';
+  const preview = comments.slice(-5);
+  const moreText = comments.length > preview.length ? `<button class="ig-view-comments" data-action="toggle-comments" data-id="${escapeAttr(momentId)}">ดูคอมเมนต์ก่อนหน้าอีก ${comments.length - preview.length} รายการ</button>` : '';
   return `
-    <div class="comments-box">
+    <section class="comments-box ig-comments-panel">
       ${moreText}
-      ${preview.map(c => `<div class="comment-line"><b>${escapeHtml(c.author || 'เพื่อน')}</b><span>${escapeHtml(c.text || '')}</span>${canManageItem(c) ? `<button class="mini-link danger" data-action="delete-comment" data-id="${escapeAttr(c.id)}">ลบ</button>` : ''}</div>`).join('')}
-      <form class="comment-form" data-form="comment" data-moment-id="${escapeAttr(momentId)}">
-        <input class="input" name="text" placeholder="คอมเมนต์ / แซวเพื่อน / เพิ่มบริบทของรูปนี้" required />
-        <button class="btn primary" type="submit">ส่ง</button>
+      ${preview.map(c => `<div class="comment-line modern-comment">${renderAvatar({ accountId: c.accountId || c.createdById, name: c.author || c.createdBy, className: 'avatar comment-avatar' })}<div class="comment-bubble"><b>${escapeHtml(c.author || 'เพื่อน')}</b><span>${escapeHtml(c.text || '')}</span></div>${canManageItem(c) ? `<button class="comment-delete" data-action="delete-comment" data-id="${escapeAttr(c.id)}" aria-label="ลบคอมเมนต์">×</button>` : ''}</div>`).join('')}
+      <form class="comment-form ig-comment-composer" data-form="comment" data-moment-id="${escapeAttr(momentId)}">
+        ${currentAvatar('avatar comment-avatar')}
+        <input class="input" name="text" placeholder="เพิ่มความคิดเห็น…" required />
+        <button class="comment-send" type="submit" aria-label="ส่งคอมเมนต์">ส่ง</button>
       </form>
-    </div>
+    </section>
   `;
 }
 
@@ -1108,19 +1215,31 @@ function renderAlbumMedia(mediaList, momentId) {
   if (!mediaList.length) return '<div class="empty album-empty">ไม่มีรูป แต่มีเรื่องให้จำ</div>';
   const count = mediaList.length;
   return `
-    <div class="album-carousel" aria-label="อัลบั้ม ${count} ไฟล์">
-      ${count > 1 ? `<span class="album-count-badge">1/${count}</span>` : ''}
-      ${mediaList.map((media, index) => renderMediaItem(media, momentId, index)).join('')}
+    <div class="album-stage" data-album-stage="${escapeAttr(momentId)}">
+      <div class="album-carousel" data-album-id="${escapeAttr(momentId)}" aria-label="อัลบั้ม ${count} ไฟล์">
+        ${mediaList.map((media, index) => renderMediaItem(media, momentId, index, count)).join('')}
+      </div>
+      ${count > 1 ? `<div class="album-hint">ปัดเพื่อดูรูปทั้งหมด</div><div class="album-thumb-rail">${mediaList.map((media, index) => renderAlbumThumb(media, momentId, index)).join('')}</div>` : ''}
     </div>
   `;
 }
 
-function renderMediaItem(media, momentId, index) {
+function renderAlbumThumb(media, momentId, index) {
+  const label = index + 1;
+  let inner = `<span>${label}</span>`;
+  if (media?.localDataUrl && media.mimeType?.startsWith('image/')) inner = `<img src="${escapeAttr(media.localDataUrl)}" alt="thumb ${label}" />`;
+  else if (media?.thumbnailLink) inner = `<img src="${escapeAttr(media.thumbnailLink)}" alt="thumb ${label}" />`;
+  else if (media?.mimeType?.startsWith('video/')) inner = '<span>▶</span>';
+  return `<button class="album-thumb" data-action="show-album-index" data-id="${escapeAttr(momentId)}" data-index="${index}" aria-label="ดูรูปที่ ${label}">${inner}</button>`;
+}
+
+function renderMediaItem(media, momentId, index, count = 1) {
   const name = media?.name || `media-${index + 1}`;
   const full = media?.fullResolution || media?.driveFileId || media?.localBlobId ? 'Full-res' : 'Preview';
   return `
-    <figure class="album-item">
+    <figure class="album-item" data-album-slide="${index}">
       <div class="media-box">${renderMedia(media)}</div>
+      ${count > 1 ? `<span class="album-count-badge album-slide-badge">${index + 1}/${count}</span>` : ''}
       <figcaption>
         <span>${escapeHtml(name)}</span>
         <button class="mini-link" data-action="download-media" data-moment-id="${escapeAttr(momentId)}" data-media-index="${index}">บันทึก</button>
@@ -1195,21 +1314,43 @@ function renderAccountModal() {
 function renderComposerModal() {
   const isGame = composer.source === 'game';
   const isQuest = composer.source === 'quest';
+  const title = composer.type === 'story' ? 'สร้าง Story' : isGame ? 'โพสต์โมเมนต์เกม' : isQuest ? 'โพสต์หลักฐานภารกิจ' : 'สร้างโพสต์ใหม่';
   return `
-    <div class="modal-backdrop" data-action="close-composer">
-      <div class="composer-modal card" data-modal-panel role="dialog" aria-modal="true" aria-label="เพิ่มโมเมนต์" tabindex="-1">
-        <div class="composer-head">
-          <div>
-            <h3>${isGame ? 'โพสต์โมเมนต์จากเกม' : isQuest ? 'โพสต์หลักฐานภารกิจ' : 'สร้างโพสต์ใหม่'}</h3>
-            <p class="muted">อัปโหลดรูป/วิดีโอได้ทั้งอัลบั้ม พร้อมแคปชันและเช็กอิน</p>
-          </div>
-          <button class="icon-btn" type="button" data-action="close-composer" aria-label="ปิดหน้าเพิ่มโมเมนต์">✕</button>
+    <div class="modal-backdrop composer-backdrop" data-action="close-composer">
+      <div class="composer-modal modern-composer" data-modal-panel role="dialog" aria-modal="true" aria-label="เพิ่มโมเมนต์" tabindex="-1">
+        <div class="composer-sticky-head">
+          <button class="composer-close" type="button" data-action="close-composer" aria-label="ปิดหน้าเพิ่มโมเมนต์">✕</button>
+          <b>${title}</b>
+          <button class="composer-share-top" type="submit" form="momentComposerForm">แชร์</button>
         </div>
-        <form class="stack" data-form="moment">
+        <form id="momentComposerForm" class="composer-form" data-form="moment">
           <input type="hidden" name="source" value="${escapeAttr(composer.source)}" />
-          <div class="grid two">
-            <div class="field"><label>บัญชีที่โพสต์</label><input class="input" name="author" value="${escapeAttr(currentUserName())}" readonly /></div>
-            <div class="field"><label>ประเภทโพสต์</label>
+          <input type="hidden" name="sourceQuestId" value="${escapeAttr(composer.questId || '')}" />
+          <input type="hidden" name="sourceQuestTitle" value="${escapeAttr(composer.questTitle || '')}" />
+          <input type="hidden" name="gpsLat" value="${escapeAttr(composer.gps?.lat || '')}" />
+          <input type="hidden" name="gpsLng" value="${escapeAttr(composer.gps?.lng || '')}" />
+          <input type="hidden" name="gpsAccuracy" value="${escapeAttr(composer.gps?.accuracy || '')}" />
+
+          <div class="composer-author-row">
+            ${currentAvatar('avatar')}
+            <div><b>${escapeHtml(currentUserName())}</b><span>${currentUserBadge()} · แชร์ไปที่ Feed</span></div>
+          </div>
+
+          ${(isGame || isQuest) ? `<div class="composer-context-card"><span>${isGame ? '🎲' : '🧭'}</span><b>${escapeHtml(isGame ? composer.gameCard || 'Game Moment' : composer.questTitle || 'Quest Moment')}</b></div>` : ''}
+
+          <div class="composer-caption-box">
+            <textarea class="composer-caption" name="caption" required placeholder="เขียนแคปชัน…">${escapeHtml(composer.caption || composer.gameCard || '')}</textarea>
+          </div>
+
+          <div class="composer-file-card">
+            <div class="composer-file-head"><b>อัลบั้ม</b><span>ไฟล์ต้นฉบับเต็มความละเอียด</span></div>
+            <input class="native-file-input" id="composerMediaInput" name="media" type="file" accept="image/*,video/*" multiple />
+            <label class="composer-file-drop" for="composerMediaInput">＋ เลือกรูป/วิดีโอ</label>
+            <div id="composerFilePreview" class="composer-preview-grid">${composerFiles.length ? '' : '<div class="composer-empty-preview">เลือกรูปหรือวิดีโอเพื่อดูตัวอย่างก่อนโพสต์</div>'}</div>
+          </div>
+
+          <div class="composer-options-card">
+            <div class="field compact"><label>ประเภท</label>
               <select class="select" name="type">
                 <option value="moment" ${composer.type === 'moment' ? 'selected' : ''}>โพสต์</option>
                 <option value="story" ${composer.type === 'story' ? 'selected' : ''}>Story</option>
@@ -1219,35 +1360,27 @@ function renderComposerModal() {
                 <option value="quote" ${composer.type === 'quote' ? 'selected' : ''}>Quote เด็ด</option>
               </select>
             </div>
-          </div>
-          ${isGame ? `<div class="game-preview"><span>🎲</span><b>${escapeHtml(composer.gameCard || 'Game Moment')}</b></div>` : ''}
-          ${isQuest ? `<div class="game-preview"><span>🧭</span><b>${escapeHtml(composer.questTitle || 'Quest Moment')}</b></div>` : ''}
-          <input type="hidden" name="sourceQuestId" value="${escapeAttr(composer.questId || '')}" />
-          <input type="hidden" name="sourceQuestTitle" value="${escapeAttr(composer.questTitle || '')}" />
-          <div class="field"><label>แคปชัน</label><textarea class="textarea" name="caption" required placeholder="เขียนแคปชันแบบลง IG / เล่าโมเมนต์นี้ให้เพื่อนจำ">${escapeHtml(composer.caption || composer.gameCard || '')}</textarea></div>
-          <div class="grid two">
-            <div class="field"><label>สถานที่ / เช็กอิน</label><input class="input" name="place" value="${escapeAttr(composer.place || (isGame ? 'เกมบนแพ' : isQuest ? 'ภารกิจแก๊ง' : ''))}" placeholder="เขื่อนเขาแหลม / สะพานมอญ / บนแพ" /></div>
-            <div class="field"><label>อารมณ์</label>
+            <div class="field compact"><label>สถานที่</label><input class="input" name="place" value="${escapeAttr(composer.place || (isGame ? 'เกมบนแพ' : isQuest ? 'ภารกิจแก๊ง' : ''))}" placeholder="เพิ่มสถานที่" /></div>
+            <div class="field compact"><label>อารมณ์</label>
               <select class="select" name="mood">
                 ${['ตำนาน','ฮา','ซึ้ง','วิวสวย','เหนื่อยแต่คุ้ม','ไม่ควรหลุด','เกมบนแพ'].map(m => `<option ${composer.mood === m ? 'selected' : ''}>${m}</option>`).join('')}
               </select>
             </div>
           </div>
-          <div class="gps-card">
-            <input type="hidden" name="gpsLat" value="${escapeAttr(composer.gps?.lat || '')}" />
-            <input type="hidden" name="gpsLng" value="${escapeAttr(composer.gps?.lng || '')}" />
-            <input type="hidden" name="gpsAccuracy" value="${escapeAttr(composer.gps?.accuracy || '')}" />
-            <div><b>📍 GPS Check-in</b><p>${composer.gps ? `เพิ่มพิกัดแล้ว · ${Number(composer.gps.lat).toFixed(5)}, ${Number(composer.gps.lng).toFixed(5)}` : 'แตะเพื่อเพิ่มตำแหน่งปัจจุบันในโพสต์นี้'}</p></div>
+
+          <div class="composer-gps-card">
+            <div><b>📍 Check-in GPS</b><p data-composer-gps-text>${composer.gps ? `เพิ่มพิกัดแล้ว · ${Number(composer.gps.lat).toFixed(5)}, ${Number(composer.gps.lng).toFixed(5)}` : 'เพิ่มตำแหน่งปัจจุบันในโพสต์นี้'}</p></div>
             <button class="btn ghost" type="button" data-action="capture-gps">เพิ่ม GPS</button>
           </div>
-          <div class="field"><label>รูป/วิดีโอทั้งอัลบั้ม</label><input class="input" name="media" type="file" accept="image/*,video/*" multiple /></div>
-          <div class="composer-tip">รูป/วิดีโอจะถูกเก็บแบบเต็มความละเอียด ไม่บีบอัด</div>
-          <button class="btn primary full" type="submit">แชร์ลง Feed</button>
+
+          <input type="hidden" name="author" value="${escapeAttr(currentUserName())}" />
+          <button class="btn primary full composer-bottom-share" type="submit">แชร์ลง Feed</button>
         </form>
       </div>
     </div>
   `;
 }
+
 
 function renderQuest() {
   const groups = groupBy(QUESTS, q => q.day);
@@ -1629,6 +1762,7 @@ function buildReelItems() {
 
 
 function openComposer(dataset = {}) {
+  clearComposerFiles();
   currentPage = 'feed';
   composer = {
     open: true,
@@ -1646,6 +1780,7 @@ function openComposer(dataset = {}) {
 }
 
 function openGameComposer() {
+  clearComposerFiles();
   const text = sessionStorage.getItem('currentGameCard');
   if (!text) return toast('เปิดการ์ดเกมก่อน แล้วค่อยโพสต์โมเมนต์');
   composer = {
@@ -1663,6 +1798,7 @@ function openGameComposer() {
 
 
 function openQuestComposer(id) {
+  clearComposerFiles();
   const quest = QUESTS.find(q => q.id === id);
   if (!quest) return toast('ไม่พบภารกิจนี้');
   composer = {
@@ -1681,7 +1817,9 @@ function openQuestComposer(id) {
 }
 
 function closeComposer() {
+  clearComposerFiles();
   composer = { open: false, source: 'feed', caption: '', place: '', mood: 'ตำนาน', type: 'moment', gameCard: '', gps: null };
+  if (pendingRenderAfterModal) return flushDeferredRender();
   render();
 }
 
@@ -1743,6 +1881,7 @@ async function onClick(event) {
     if (action === 'checklist') return toggleChecklist(Number(btn.dataset.index));
     if (action === 'toggle-feature') return toggleFeaturedMoment(btn.dataset.id);
     if (action === 'download-media') return downloadMomentMedia(btn.dataset.momentId, Number(btn.dataset.mediaIndex || 0));
+    if (action === 'show-album-index') return scrollAlbumToIndex(btn.dataset.id, Number(btn.dataset.index || 0));
     if (action === 'download-album') return downloadMomentAlbum(btn.dataset.id);
     if (action === 'retry-upload-moment') return retryUploadMoment(btn.dataset.id);
     if (action === 'auto-connect-hub') return autoConnectHub();
@@ -1795,7 +1934,17 @@ async function onSubmit(event) {
   }
 }
 
+function onInput(event) {
+  const form = event.target.closest('form[data-form="moment"]');
+  if (form) updateComposerDraftFromForm(form);
+}
+
 async function onChange(event) {
+  const momentForm = event.target.closest('form[data-form="moment"]');
+  if (momentForm) {
+    updateComposerDraftFromForm(momentForm);
+    if (event.target.name === 'media') setComposerFiles(event.target.files || []);
+  }
   if (event.target.id === 'gameDeck') {
     currentGameDeck = event.target.value;
     toast('เปลี่ยนเกมแล้ว');
@@ -1878,7 +2027,14 @@ async function captureGpsForComposer() {
     };
     if (!composer.place) composer.place = 'ตำแหน่งปัจจุบัน';
     toast('เพิ่ม GPS ในโพสต์แล้ว');
-    render();
+    const gpsText = document.querySelector('[data-composer-gps-text]');
+    if (gpsText) gpsText.textContent = `เพิ่มพิกัดแล้ว · ${Number(composer.gps.lat).toFixed(5)}, ${Number(composer.gps.lng).toFixed(5)}`;
+    const form = document.querySelector('form[data-form="moment"]');
+    if (form) {
+      form.elements.gpsLat.value = composer.gps.lat;
+      form.elements.gpsLng.value = composer.gps.lng;
+      form.elements.gpsAccuracy.value = composer.gps.accuracy;
+    } else render();
   }, error => {
     toast(error.message || 'ไม่สามารถดึง GPS ได้');
   }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 });
@@ -1983,6 +2139,14 @@ async function addMember(data, form) {
   render();
 }
 
+
+function scrollAlbumToIndex(momentId, index = 0) {
+  const carousel = document.querySelector(`[data-album-id="${cssEscape(momentId)}"]`);
+  if (!carousel) return;
+  const slide = carousel.querySelector(`[data-album-slide="${Number(index) || 0}"]`);
+  if (slide) slide.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
+}
+
 async function addMoment(data, form) {
   const submitBtn = form.querySelector('button[type="submit"]');
   const originalLabel = submitBtn?.textContent || '';
@@ -1992,7 +2156,7 @@ async function addMoment(data, form) {
   }
   uploadUi = { active: true, tone: 'info', text: 'กำลังเก็บไฟล์ต้นฉบับไว้ในเครื่องก่อนอัปโหลด…' };
 
-  const files = data.getAll('media').filter(file => file && file.size);
+  const files = (composerFiles.length ? composerFiles : data.getAll('media')).filter(file => file && file.size);
   const author = String(data.get('author') || state.profile.name || 'แก๊งนี้').trim();
   const now = new Date().toISOString();
   let moment = {
@@ -2055,13 +2219,14 @@ async function addMoment(data, form) {
       await uploadRecordIfConnected('quotes', quote);
     }
 
-    moment.uploadState = files.length ? 'uploading' : 'syncing';
-    moment.uploadMessage = files.length ? 'กำลังส่งไฟล์เต็มความละเอียดขึ้น Google Drive' : 'กำลังส่งข้อมูลโพสต์';
-    uploadUi = { active: true, tone: 'info', text: moment.uploadMessage };
+    const canUploadMediaNow = !files.length || driveMediaReady();
+    moment.uploadState = files.length ? (canUploadMediaNow ? 'uploading' : 'pending') : 'syncing';
+    moment.uploadMessage = files.length ? (canUploadMediaNow ? `กำลังส่งไฟล์เต็มความละเอียดขึ้น Google Drive 0/${files.length}` : driveMediaStatusText()) : 'กำลังส่งข้อมูลโพสต์';
+    uploadUi = canUploadMediaNow ? { active: true, tone: 'info', text: moment.uploadMessage } : { active: false, text: '', tone: 'warning' };
     persist();
     render();
 
-    const ok = await uploadMomentRecordIfConnected(moment);
+    const ok = canUploadMediaNow ? await uploadMomentRecordIfConnected(moment) : false;
     moment.uploadState = ok ? 'synced' : (files.length ? 'pending' : 'local');
     moment.uploadMessage = ok ? 'ซิงก์สำเร็จ' : 'ยังรอส่งขึ้น Hub';
     moment.updatedAt = new Date().toISOString();
@@ -2088,8 +2253,17 @@ async function addMoment(data, form) {
 async function retryUploadMoment(id) {
   const moment = state.moments.find(item => item.id === id && !item.deleted);
   if (!moment) return toast('ไม่พบโพสต์นี้');
+  const needsDrive = (moment.media || []).some(media => media.pendingUpload || (!media.driveFileId && media.localBlobId));
+  if (needsDrive && !driveMediaReady()) {
+    moment.uploadState = 'pending';
+    moment.uploadMessage = driveMediaStatusText();
+    persist();
+    toast(moment.uploadMessage);
+    render();
+    return;
+  }
   moment.uploadState = 'uploading';
-  moment.uploadMessage = 'กำลังอัปโหลดซ้ำ…';
+  moment.uploadMessage = needsDrive ? 'กำลังอัปโหลดซ้ำ 0/' + (moment.media || []).length : 'กำลังส่งข้อมูลโพสต์…';
   uploadUi = { active: true, tone: 'info', text: 'กำลังส่งโพสต์และไฟล์ขึ้น Hub…' };
   persist();
   render();
@@ -2121,8 +2295,16 @@ async function uploadMomentWithStoredMedia(moment, options = {}) {
   remoteMoment.media = [];
 
   const localBlobIds = [];
-  for (const media of moment.media || []) {
+  const uploadItems = moment.media || [];
+  for (let mediaIndex = 0; mediaIndex < uploadItems.length; mediaIndex += 1) {
+    const media = uploadItems[mediaIndex];
     localBlobIds.push(media.localBlobId || '');
+    moment.uploadState = 'uploading';
+    moment.uploadMessage = `กำลังอัปโหลดไฟล์ ${mediaIndex + 1}/${uploadItems.length}: ${media.name || 'media'}`;
+    uploadUi = { active: true, tone: 'info', text: moment.uploadMessage };
+    persist();
+    updatePostUploadStatusInline(moment);
+    renderSyncStatusOnly();
     if (media.driveFileId) {
       remoteMoment.media.push(stripTransientMedia({ ...media, pendingUpload: false, fullResolution: true }));
       continue;
@@ -2646,7 +2828,7 @@ async function uploadPendingSocialRecords(options = {}) {
   if (drive.connected && state.settings.driveRootFolderId) {
     for (const moment of state.moments.filter(m => (m.media || []).some(media => media.pendingUpload || media.localBlobId))) {
       try {
-        const result = await uploadMomentWithStoredMedia(moment, { skipDriveRecord: true });
+        const result = await uploadMomentWithStoredMedia(moment, { skipDriveRecord: false });
         Object.assign(moment, result, { storage: 'local' });
       } catch (error) {
         console.warn('Cannot upload media before Firebase sync:', error);
@@ -2677,7 +2859,7 @@ async function uploadPendingSocialRecords(options = {}) {
 }
 
 async function connectDrive() {
-  await drive.authorize({ prompt: 'consent' });
+  if (!drive.connected) await drive.authorize({ prompt: state.settings.driveConsentGranted ? '' : 'consent' });
   if (state.settings.driveRootFolderId) await drive.ensureStructure();
   persist();
   startSyncLoop();
@@ -2688,7 +2870,7 @@ async function connectDrive() {
 
 async function createDriveFolder() {
   if (!requireAdmin('เฉพาะ Admin เท่านั้นที่สร้างโฟลเดอร์รูปทริปได้')) return;
-  await drive.authorize({ prompt: drive.connected ? '' : 'consent' });
+  await drive.authorize({ prompt: drive.connected || state.settings.driveConsentGranted ? '' : 'consent' });
   const folder = await drive.createTripFolder(state.settings.driveRootFolderName);
   toast(`สร้างโฟลเดอร์แล้ว: ${folder.name}`);
   startSyncLoop();
@@ -2821,10 +3003,17 @@ async function uploadRecordIfConnected(collection, item, options = {}) {
 }
 
 async function uploadMomentRecordIfConnected(moment) {
-  moment.uploadState ||= (moment.media || []).length ? 'pending' : 'local';
+  const hasMedia = (moment.media || []).length > 0;
+  moment.uploadState ||= hasMedia ? 'pending' : 'local';
   try {
-    if ((moment.media || []).length && drive.connected && state.settings.driveRootFolderId) {
-      const result = await uploadMomentWithStoredMedia(moment, { skipDriveRecord: state.settings.firebaseEnabled && firebase.connected });
+    if (hasMedia && !driveMediaReady()) {
+      moment.uploadState = 'pending';
+      moment.uploadMessage = driveMediaStatusText();
+      persist();
+      return false;
+    }
+    if (hasMedia && drive.connected && state.settings.driveRootFolderId) {
+      const result = await uploadMomentWithStoredMedia(moment, { skipDriveRecord: false });
       Object.assign(moment, result);
     }
 
@@ -2892,7 +3081,7 @@ function applyFirebaseData(shared = {}) {
   mergeChecklistRecords(shared.checklists || [], 'firebase');
   state.settings.lastFirebaseError = '';
   persist();
-  if (!document.hidden) render();
+  if (!document.hidden) renderRemoteUpdate();
 }
 
 function applyDriveData(shared = {}) {

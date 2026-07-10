@@ -1,8 +1,10 @@
 import { dataUrlToBlob, uid } from './state.js';
 
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+// Full Drive scope is used so every member can upload into the admin shared trip folder.
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
+const DRIVE_TOKEN_CACHE_KEY = 'kannajaburi-drive-token-v2';
 
 export const DRIVE_COLLECTIONS = [
   'accounts',
@@ -32,6 +34,35 @@ export class DriveSync {
     this.mediaCache = new Map();
     this.gisReady = false;
     this.lastError = '';
+    this.restoreCachedToken();
+  }
+
+  restoreCachedToken() {
+    try {
+      const raw = sessionStorage.getItem(DRIVE_TOKEN_CACHE_KEY) || localStorage.getItem(DRIVE_TOKEN_CACHE_KEY);
+      if (!raw) return;
+      const cached = JSON.parse(raw);
+      if (cached?.accessToken && Number(cached.expiresAt || 0) > Date.now() + 60000) {
+        this.accessToken = cached.accessToken;
+        this.status('Drive session restored', 'success');
+      }
+    } catch (error) {
+      console.warn('Cannot restore Drive token:', error);
+    }
+  }
+
+  cacheToken(accessToken, expiresIn = 3600) {
+    try {
+      const payload = JSON.stringify({ accessToken, expiresAt: Date.now() + Math.max(60, Number(expiresIn || 3600)) * 1000 });
+      sessionStorage.setItem(DRIVE_TOKEN_CACHE_KEY, payload);
+      if (this.getState().settings?.driveSessionRemember !== false) localStorage.setItem(DRIVE_TOKEN_CACHE_KEY, payload);
+    } catch (error) {
+      console.warn('Cannot cache Drive token:', error);
+    }
+  }
+
+  clearCachedToken() {
+    try { sessionStorage.removeItem(DRIVE_TOKEN_CACHE_KEY); localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY); } catch (error) { console.warn(error); }
   }
 
   get config() {
@@ -84,6 +115,11 @@ export class DriveSync {
             return reject(new Error(response.error));
           }
           this.accessToken = response.access_token;
+          this.cacheToken(response.access_token, response.expires_in || 3600);
+          const state = this.getState();
+          state.settings ||= {};
+          state.settings.driveConsentGranted = true;
+          this.saveState?.();
           this.lastError = '';
           this.status('Drive connected', 'success');
           this.toast?.('เชื่อมต่อ Google Drive แล้ว');
@@ -110,6 +146,7 @@ export class DriveSync {
     });
     if (response.status === 401 && retry) {
       this.accessToken = '';
+      this.clearCachedToken();
       await this.authorize({ prompt: '' });
       return this.request(url, options, false);
     }
@@ -135,7 +172,7 @@ export class DriveSync {
     await this.uploadRecord('meta', {
       id: 'trip-manifest',
       app: 'กาญนะจ๊ะบุรีทริป',
-      version: '1.6.0',
+      version: '2.5.0',
       mode: 'firebase-first-drive-media',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
